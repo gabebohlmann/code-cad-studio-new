@@ -1,5 +1,3 @@
-# core/transpiler.py
-
 import FreeCAD
 
 def fingerprint(edge):
@@ -187,6 +185,26 @@ def transpile_object(obj):
     elif obj.TypeId == "Part::Cylinder":
         r, h = obj.Radius.Value, obj.Height.Value
         return f"{header}part = Cylinder(radius={r}, height={h}, align=(Align.CENTER, Align.CENTER, Align.MIN))"
+
+    # -----------------------------
+    # NEW: Part::Sphere -> Sphere()
+    # -----------------------------
+    elif obj.TypeId == "Part::Sphere":
+        r = obj.Radius.Value
+
+        # FreeCAD Part::Sphere usually has Angle1/Angle2/Angle3
+        # Angle1: bottom hemisphere limit (default -90)
+        # Angle2: top hemisphere limit (default 90)
+        # Angle3: revolution (default 360)
+        a1 = obj.Angle1.Value if hasattr(obj, "Angle1") else -90.0
+        a2 = obj.Angle2.Value if hasattr(obj, "Angle2") else 90.0
+        a3 = obj.Angle3.Value if hasattr(obj, "Angle3") else 360.0
+
+        return (
+            f"{header}part = Sphere("
+            f"radius={r}, arc_size1={a1}, arc_size2={a2}, arc_size3={a3}, "
+            f"align=(Align.CENTER, Align.CENTER, Align.CENTER))"
+        )
 
     elif obj.TypeId in ["Part::Fillet", "Part::Chamfer"]:
         parent = None
