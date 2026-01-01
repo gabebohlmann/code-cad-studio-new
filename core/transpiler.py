@@ -1,6 +1,8 @@
 # core/transpiler.py
 
 import FreeCAD
+import math
+
 
 def fingerprint(edge):
     try:
@@ -16,21 +18,18 @@ def _safe_center(geo_shape):
     - Part.Vertex often has .Point (but may not have CenterOfMass reliably)
     - Part.Shape of ShapeType 'Vertex' may expose Vertexes[0].Point
     """
-    # 1) Direct vertex point (common for Part.Vertex)
     if hasattr(geo_shape, "Point"):
         try:
             return geo_shape.Point
         except:
             pass
 
-    # 2) CenterOfMass (common for Edge/Face/Solid)
     if hasattr(geo_shape, "CenterOfMass"):
         try:
             return geo_shape.CenterOfMass
         except:
             pass
 
-    # 3) If it's a Part.Shape wrapper with Vertexes list
     if hasattr(geo_shape, "Vertexes"):
         try:
             if geo_shape.Vertexes and hasattr(geo_shape.Vertexes[0], "Point"):
@@ -38,7 +37,6 @@ def _safe_center(geo_shape):
         except:
             pass
 
-    # 4) Fallback to bounding box center
     if hasattr(geo_shape, "BoundBox"):
         try:
             return geo_shape.BoundBox.Center
@@ -52,16 +50,11 @@ def solve_selector(geo_shape):
     """
     Return a build123d selector string for a FreeCAD subshape.
     Supports: Vertex, Edge, Face. Returns None for Compound/unsupported.
-
-    NOTE: Vertex selection previously failed because some FreeCAD vertex objects
-    don't provide CenterOfMass reliably; we now use .Point / Vertexes[0].Point.
     """
     try:
-        # Some subobjects can be returned as None
         if not geo_shape:
             return None
 
-        # Compounds are ambiguous for selector generation
         if getattr(geo_shape, "ShapeType", None) == "Compound":
             return None
 
@@ -79,7 +72,6 @@ def solve_selector(geo_shape):
             return f"part.edges().sort_by_distance(({cx}, {cy}, {cz})).first"
 
         if st == "Face":
-            # Prefer axis-aligned face selectors when possible
             try:
                 n = geo_shape.normalAt(0, 0)
                 if abs(n.z) > 0.99:
@@ -92,7 +84,6 @@ def solve_selector(geo_shape):
                 pass
             return f"part.faces().sort_by_distance(({cx}, {cy}, {cz})).first"
 
-        # Unsupported ShapeType (Wire/Solid/etc.) for now
         return None
 
     except:
@@ -177,11 +168,82 @@ def get_geometry_from_links(obj, parent):
     return geoms
 
 
-def _approx(a, b, tol=1e-7):
-    try:
-        return abs(float(a) - float(b)) <= tol
-    except Exception:
-        return False
+# -----------------------------------------------------------------------------
+# Sphere offset correction
+# -----------------------------------------------------------------------------
+def _clamp(x, lo, hi):
+    return max(lo, min(hi, x))
+
+
+def _partial_sphere_bbox_center(radius, a1_deg, a2_deg, a3_deg):
+    """
+    Approximate bounding box center (in sphere-center coordinates) for a FreeCAD-like
+    clipped sphere:
+      - latitude range [a1, a2] where -90..90
+      - revolution about Z from 0 .. a3 (degrees)
+
+    This is intentionally consistent with "sphere centered at origin",
+    which is what FreeCAD does for Part::Sphere.
+
+    We use:
+      zmin = r*sin(a1), zmax = r*sin(a2)
+      xy radius max = r*cos(lat0) where lat0 is clamped 0 inside [a1,a2]
+      sector angles = [0, a3] (normalized)
+      bbox extremes in xy from sector endpoints plus quadrant angles inside.
+    """
+    r = float(radius)
+
+    # Normalize latitude ordering
+    a1 = float(a1_deg)
+    a2 = float(a2_deg)
+    if a2 < a1:
+        a1, a2 = a2, a1
+
+    # Z bounds from latitude
+    zmin = r * math.sin(math.radians(a1))
+    zmax = r * math.sin(math.radians(a2))
+    cz = 0.5 * (zmin + zmax)
+
+    # Handle full revolution => symmetric in XY
+    theta = float(a3_deg)
+
+    # Normalize theta into [0, 360] while preserving "full" if >= 360
+    if abs(theta) >= 360.0:
+        return (0.0, 0.0, cz)
+
+    # Clamp lat0 to closest-to-equator latitude to maximize XY radius
+    lat0 = _clamp(0.0, a1, a2)
+    rho = r * math.cos(math.radians(lat0))
+
+    # If the band doesn't include any meaningful XY radius
+    if abs(rho) < 1e-12:
+        return (0.0, 0.0, cz)
+
+    # Consider sector angles from 0..theta (allow negative theta)
+    start = 0.0
+    end = theta
+    if end < start:
+        start, end = end, start
+
+    # Candidate angles (deg): endpoints + quadrant angles within [start,end]
+    candidates = [start, end]
+    for q in [0.0, 90.0, 180.0, 270.0, 360.0]:
+        if start - 1e-9 <= q <= end + 1e-9:
+            candidates.append(q)
+
+    xs = []
+    ys = []
+    for ang in candidates:
+        a = math.radians(ang)
+        xs.append(rho * math.cos(a))
+        ys.append(rho * math.sin(a))
+
+    xmin, xmax = min(xs), max(xs)
+    ymin, ymax = min(ys), max(ys)
+    cx = 0.5 * (xmin + xmax)
+    cy = 0.5 * (ymin + ymax)
+
+    return (cx, cy, cz)
 
 
 def transpile_object(obj):
@@ -196,30 +258,39 @@ def transpile_object(obj):
         return f"{header}part = Cylinder(radius={r}, height={h}, align=(Align.CENTER, Align.CENTER, Align.MIN))"
 
     elif obj.TypeId == "Part::Sphere":
-        # FreeCAD Part::Sphere supports partial spheres via Angle1/Angle2/Angle3.
-        # A "full sphere" is typically Angle1=-90, Angle2=90, Angle3=360.
         r = obj.Radius.Value
 
-        # Be defensive about property names:
-        a1 = getattr(getattr(obj, "Angle1", None), "Value", None)
-        a2 = getattr(getattr(obj, "Angle2", None), "Value", None)
-        a3 = getattr(getattr(obj, "Angle3", None), "Value", None)
+        # FreeCAD Part Sphere uses Angle1/Angle2/Angle3 for partial spheres
+        a1 = float(getattr(obj, "Angle1", -90.0))
+        a2 = float(getattr(obj, "Angle2", 90.0))
+        a3 = float(getattr(obj, "Angle3", 360.0))
 
-        # If angles are missing for some reason, assume full sphere
-        if a1 is None or a2 is None or a3 is None:
-            return f"{header}part = Sphere(radius={r}, align=(Align.CENTER, Align.CENTER, Align.CENTER))"
+        def _is_default(v, d):
+            try:
+                return abs(float(v) - float(d)) < 1e-9
+            except Exception:
+                return False
 
-        # Omit arc params when this is the default full sphere
-        is_full = _approx(a1, -90.0) and _approx(a2, 90.0) and _approx(a3, 360.0)
+        is_full = _is_default(a1, -90.0) and _is_default(a2, 90.0) and _is_default(a3, 360.0)
 
         if is_full:
             return f"{header}part = Sphere(radius={r}, align=(Align.CENTER, Align.CENTER, Align.CENTER))"
-        else:
-            return (
-                f"{header}part = Sphere("
-                f"radius={r}, arc_size1={a1}, arc_size2={a2}, arc_size3={a3}, "
-                f"align=(Align.CENTER, Align.CENTER, Align.CENTER))"
-            )
+
+        # Build the clipped sphere
+        lines = []
+        lines.append(
+            f"{header}part = Sphere(radius={r}, arc_size1={a1}, arc_size2={a2}, arc_size3={a3}, "
+            f"align=(Align.CENTER, Align.CENTER, Align.CENTER))"
+        )
+
+        # ✅ Correct build123d bbox-centering so the sphere center stays at origin like FreeCAD
+        cx, cy, cz = _partial_sphere_bbox_center(r, a1, a2, a3)
+
+        # Only emit if meaningful
+        if abs(cx) > 1e-9 or abs(cy) > 1e-9 or abs(cz) > 1e-9:
+            lines.append(f"part = Pos({cx:.6f}, {cy:.6f}, {cz:.6f}) * part")
+
+        return "\n".join(lines)
 
     elif obj.TypeId in ["Part::Fillet", "Part::Chamfer"]:
         parent = None

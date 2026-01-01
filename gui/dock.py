@@ -310,14 +310,12 @@ class B123dDockWidget(QtGui.QDockWidget):
         """Called when there are no non-shadow Part:: objects in the document."""
         self.programmatic_update = True
         try:
-            # Clear editor
             self.editor.blockSignals(True)
             try:
                 self.editor.setPlainText("")
             finally:
                 self.editor.blockSignals(False)
 
-            # Clear tuner widgets
             for name in list(self.param_widgets.keys()):
                 try:
                     self.param_widgets[name].deleteLater()
@@ -325,16 +323,13 @@ class B123dDockWidget(QtGui.QDockWidget):
                     pass
                 del self.param_widgets[name]
 
-            # Reset selector UI
             self.set_selector_text(None, hint="No part in document. Create a Part:: object…")
 
-            # Reset status + verify bar
             self.status.setText("No Part")
             self.status.setStyleSheet("background: #eee; color: #555; padding: 5px;")
             self.verify_bar.setText("NO PART")
             self.verify_bar.setStyleSheet("background: #ccc; color: #555; padding: 8px;")
 
-            # GUARANTEE: remove shadow object so nothing remains visible
             doc = FreeCAD.ActiveDocument
             if doc:
                 shadow = doc.getObject("Build123d_Shadow")
@@ -342,7 +337,6 @@ class B123dDockWidget(QtGui.QDockWidget):
                     try:
                         doc.removeObject(shadow.Name)
                     except Exception:
-                        # Fallback: hide & try to clear shape
                         try:
                             shadow.ViewObject.Visibility = False
                         except Exception:
@@ -465,7 +459,6 @@ class B123dDockWidget(QtGui.QDockWidget):
         try:
             code = "from build123d import *\n\n" + transpile_object(tip)
 
-            # GUI->Code should NOT inject back into FreeCAD
             self.apply_code(
                 code,
                 reason="Synced (GUI → Code)",
@@ -523,7 +516,6 @@ class B123dDockWidget(QtGui.QDockWidget):
             self.verify_bar.setStyleSheet("background: #ccc; color: #555; padding: 8px;")
             return
 
-        # If shadow was deleted by clear_panel_no_part, don't error — just recreate on next apply.
         if not shadow:
             self.verify_bar.setText("NO SHADOW")
             self.verify_bar.setStyleSheet("background: #ccc; color: #555; padding: 8px;")
