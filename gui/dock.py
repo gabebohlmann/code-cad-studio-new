@@ -3,6 +3,7 @@
 from PySide import QtGui, QtCore
 import FreeCAD
 import FreeCADGui
+import FreeCAD.Part as PartModule
 import re
 
 # Import logic from core
@@ -21,7 +22,6 @@ def _round3(x):
         return x
 
 def selector_for_vertex(vertex_shape):
-    """Return a build123d selector string for a vertex."""
     try:
         p = vertex_shape.Point
         x, y, z = _round3(p.x), _round3(p.y), _round3(p.z)
@@ -30,7 +30,6 @@ def selector_for_vertex(vertex_shape):
         return None
 
 def selector_for_edge(edge_shape):
-    """Return a build123d selector string for an edge (robust fallback)."""
     try:
         c = edge_shape.CenterOfMass
         x, y, z = _round3(c.x), _round3(c.y), _round3(c.z)
@@ -39,22 +38,13 @@ def selector_for_edge(edge_shape):
         return None
 
 def selector_for_face(face_shape):
-    """
-    Return a build123d selector string for a face.
-
-    Heuristic:
-      - If face normal is axis-aligned, use sort_by(Axis.*).first/last
-      - Otherwise, fallback to sort_by_distance(center)
-    """
     try:
         c = face_shape.CenterOfMass
         cx, cy, cz = round(c.x, 2), round(c.y, 2), round(c.z, 2)
 
-        # FreeCAD Face.normalAt needs (u,v); we can get u,v from surface parameters
         uv = face_shape.Surface.parameter(c)
         n = face_shape.normalAt(uv[0], uv[1])
 
-        # axis-aligned checks
         if abs(n.z) > 0.99:
             return f"part.faces().sort_by(Axis.Z).{'last' if c.z > 0 else 'first'}"
         if abs(n.x) > 0.99:
@@ -67,7 +57,6 @@ def selector_for_face(face_shape):
         return None
 
 def selector_from_subshape(subshape):
-    """Dispatch based on shape type."""
     try:
         st = getattr(subshape, "ShapeType", None)
         if st == "Vertex":
@@ -142,7 +131,6 @@ class B123dLiveSyncObserver:
     def slotChangedObject(self, obj, prop):
         if self.panel.programmatic_update:
             return
-        # Ignore our own Shadow object to prevent loops
         if obj.TypeId.startswith("Part::") and obj.Name != "Build123d_Shadow":
             self.panel.trigger_gui_to_code_update()
 
@@ -151,10 +139,18 @@ class B123dLiveSyncObserver:
             return
         self.panel.trigger_gui_to_code_update()
 
+    def slotDeletedObject(self, obj):
+        """IMPORTANT: deletion events do not always produce slotChangedObject."""
+        try:
+            if self.panel.programmatic_update:
+                return
+            # On any deletion, re-scan tip; if none, panel will clear.
+            self.panel.trigger_gui_to_code_update()
+        except Exception:
+            pass
+
 
 class B123dSelectionObserver:
-    """Listens to selection changes and prepares selector text (button inserts it)."""
-
     def __init__(self, panel):
         self.panel = panel
 
@@ -183,7 +179,6 @@ class B123dSelectionObserver:
             pass
 
     def setPreselection(self, doc, obj_name, sub):
-        # optional: ignore preselection
         pass
 
 
@@ -215,7 +210,6 @@ class B123dDockWidget(QtGui.QDockWidget):
         self.editor.setFont(QtGui.QFont("Courier New", 10))
         l1.addWidget(self.editor)
 
-        # --- Modeling tools / selector insertion ---
         tools = QtGui.QGroupBox("Modeling Tools")
         tools_l = QtGui.QVBoxLayout()
         tools.setLayout(tools_l)
@@ -312,7 +306,56 @@ class B123dDockWidget(QtGui.QDockWidget):
         super().closeEvent(e)
 
     # -------------------------------------------------------------------------
-    # CENTRAL APPLY FUNCTION (THE ARCHITECTURE CHANGE)
+    # NEW: Clear panel + empty shadow when no part exists
+    # -------------------------------------------------------------------------
+    def clear_panel_no_part(self):
+        """Called when there are no non-shadow Part:: objects in the document."""
+        self.programmatic_update = True
+        try:
+            # Clear editor
+            self.editor.blockSignals(True)
+            try:
+                self.editor.setPlainText("")
+            finally:
+                self.editor.blockSignals(False)
+
+            # Clear tuner widgets
+            for name in list(self.param_widgets.keys()):
+                try:
+                    self.param_widgets[name].deleteLater()
+                except Exception:
+                    pass
+                del self.param_widgets[name]
+
+            # Reset selector UI
+            self.set_selector_text(None, hint="No part in document. Create a Part:: object…")
+
+            # Reset status + verify bar
+            self.status.setText("No Part")
+            self.status.setStyleSheet("background: #eee; color: #555; padding: 5px;")
+            self.verify_bar.setText("NO PART")
+            self.verify_bar.setStyleSheet("background: #ccc; color: #555; padding: 8px;")
+
+            # Empty the shadow display
+            shadow = ensure_shadow_object()
+            if shadow:
+                try:
+                    shadow.Shape = PartModule.Shape()  # empty shape
+                    shadow.touch()
+                except Exception:
+                    pass
+
+            # Recompute once (safe, quick). If document is busy, ignore.
+            try:
+                if FreeCAD.ActiveDocument:
+                    FreeCAD.ActiveDocument.recompute()
+            except Exception:
+                pass
+        finally:
+            self.programmatic_update = False
+
+    # -------------------------------------------------------------------------
+    # CENTRAL APPLY FUNCTION
     # -------------------------------------------------------------------------
     def apply_code(
         self,
@@ -325,16 +368,7 @@ class B123dDockWidget(QtGui.QDockWidget):
         schedule_verify: bool = True,
         verify_delay_ms: int = 120,
     ):
-        """
-        Single source of truth for applying code changes.
-
-        Routes ALL:
-          - typing debounce finalization
-          - slider changes
-          - selector insertion button
-          - GUI->Code transpile updates (with update_freecad=False)
-        """
-        if not new_code:
+        if new_code is None:
             return
 
         self.programmatic_update = True
@@ -350,10 +384,8 @@ class B123dDockWidget(QtGui.QDockWidget):
                 finally:
                     self.editor.blockSignals(False)
 
-            msg = "OK"
             if update_freecad:
                 success, msg = inject_code_to_freecad(new_code)
-                # When syntax/runtime error: still update status, but don't hard crash
                 if msg == "Syntax Error":
                     self.status.setText("Syntax Error")
                     self.status.setStyleSheet("background: #fdd; color: red; padding: 5px;")
@@ -380,12 +412,12 @@ class B123dDockWidget(QtGui.QDockWidget):
             self.programmatic_update = False
 
     # -------------------------------------------------------------------------
-    # GUI -> CODE (FreeCAD tree to build123d)
+    # GUI -> CODE
     # -------------------------------------------------------------------------
     def trigger_gui_to_code_update(self):
         self.status.setText("Reading FreeCAD…")
         self.status.setStyleSheet("background: #ddf; color: blue; padding: 5px;")
-        self.timer_gui_to_code.start(800)
+        self.timer_gui_to_code.start(300)  # quicker feels nicer for delete/create
 
     def find_tip_object(self):
         doc = FreeCAD.ActiveDocument
@@ -396,6 +428,9 @@ class B123dDockWidget(QtGui.QDockWidget):
         for obj in doc.Objects:
             if obj.Name != "Build123d_Shadow" and obj.TypeId.startswith("Part::"):
                 candidates.add(obj)
+
+        if not candidates:
+            return None
 
         parents = set()
         for obj in candidates:
@@ -417,13 +452,13 @@ class B123dDockWidget(QtGui.QDockWidget):
     def perform_gui_to_code(self):
         tip = self.find_tip_object()
         if not tip:
+            self.clear_panel_no_part()
             return
 
         try:
             code = "from build123d import *\n\n" + transpile_object(tip)
 
-            # IMPORTANT: GUI->Code should NOT inject back into FreeCAD
-            # (the GUI tree is the source of truth in this direction)
+            # GUI->Code should NOT inject back into FreeCAD
             self.apply_code(
                 code,
                 reason="Synced (GUI → Code)",
@@ -440,7 +475,7 @@ class B123dDockWidget(QtGui.QDockWidget):
             self.status.setStyleSheet("background: #fdd; color: red; padding: 5px;")
 
     # -------------------------------------------------------------------------
-    # CODE -> GUI (editor/slider/selector changes)
+    # CODE -> GUI
     # -------------------------------------------------------------------------
     def on_code_edited(self):
         if self.programmatic_update:
@@ -451,7 +486,6 @@ class B123dDockWidget(QtGui.QDockWidget):
         self.refresh_tuner_ui()
 
     def perform_code_to_gui(self):
-        # Editor already has the code, so don't set it again
         code = self.editor.toPlainText()
         self.apply_code(
             code,
@@ -469,13 +503,21 @@ class B123dDockWidget(QtGui.QDockWidget):
     # -------------------------------------------------------------------------
     def deferred_verification(self):
         try:
-            FreeCAD.ActiveDocument.recompute()
-            tip = self.find_tip_object()
-            shadow = ensure_shadow_object()
-            self.run_verification(tip, shadow)
+            if FreeCAD.ActiveDocument:
+                FreeCAD.ActiveDocument.recompute()
         except Exception:
-            # Document may be busy
-            pass
+            return
+
+        tip = self.find_tip_object()
+        shadow = ensure_shadow_object()
+
+        # If no tip exists anymore, keep UI consistent.
+        if not tip:
+            self.verify_bar.setText("NO PART")
+            self.verify_bar.setStyleSheet("background: #ccc; color: #555; padding: 8px;")
+            return
+
+        self.run_verification(tip, shadow)
 
     def run_verification(self, tip, shadow):
         if not tip or not shadow:
@@ -493,13 +535,20 @@ class B123dDockWidget(QtGui.QDockWidget):
             )
 
     # -------------------------------------------------------------------------
-    # TUNER LOGIC (variables -> sliders)
+    # TUNER LOGIC
     # -------------------------------------------------------------------------
     def refresh_tuner_ui(self):
         current_vars = parse_variables(self.editor.toPlainText())
         current_names = set(v["name"] for v in current_vars)
         vals = [v["value"] for v in current_vars]
         if not vals:
+            # If editor empty, ensure we clear old sliders
+            for name in list(self.param_widgets.keys()):
+                try:
+                    self.param_widgets[name].deleteLater()
+                except Exception:
+                    pass
+                del self.param_widgets[name]
             return
 
         max_val = max(vals)
@@ -530,6 +579,9 @@ class B123dDockWidget(QtGui.QDockWidget):
 
     def update_variable_from_slider(self, name, val):
         code = self.editor.toPlainText()
+        if not code.strip():
+            return
+
         lines = code.split("\n")
         pattern = re.compile(rf"^({re.escape(name)})\s*=\s*([-+]?[0-9]*\.?[0-9]+)(.*)$")
 
@@ -543,7 +595,6 @@ class B123dDockWidget(QtGui.QDockWidget):
 
         new_code = "\n".join(new_lines)
 
-        # Use the central apply function so sliders *always* propagate
         self.apply_code(
             new_code,
             reason=f"Slider: {name}",
@@ -554,7 +605,6 @@ class B123dDockWidget(QtGui.QDockWidget):
             verify_delay_ms=80,
         )
 
-        # Keep tuner UI values in sync after slider edit
         self.refresh_tuner_ui()
 
     # -------------------------------------------------------------------------
@@ -572,13 +622,17 @@ class B123dDockWidget(QtGui.QDockWidget):
             self.btn_insert_selector.setEnabled(False)
 
     def update_selector_from_current_selection(self):
+        # If no part exists, show that rather than "unsupported"
+        if not self.find_tip_object():
+            self.set_selector_text(None, hint="No part in document. Create a Part:: object…")
+            return
+
         try:
             sel = FreeCADGui.Selection.getSelectionEx()
             if not sel:
                 self.set_selector_text(None, hint="Select a face/edge/vertex…")
                 return
 
-            # Use first selected sub-element (keep simple)
             s0 = sel[0]
             if not s0.SubElementNames:
                 self.set_selector_text(None, hint="Select a face/edge/vertex…")
@@ -586,8 +640,6 @@ class B123dDockWidget(QtGui.QDockWidget):
 
             obj = s0.Object
             subname = s0.SubElementNames[0]
-
-            # FreeCAD can return "Vertex1", "Edge3", "Face6", etc.
             subshape = obj.getSubObject(subname)
             if not subshape:
                 self.set_selector_text(None, hint="Selection unsupported/complex")
@@ -609,7 +661,6 @@ class B123dDockWidget(QtGui.QDockWidget):
         cursor = self.editor.textCursor()
         cursor.insertText(self.current_selector_text)
 
-        # Apply immediately (don’t rely on debounce for button-driven actions)
         self.apply_code(
             self.editor.toPlainText(),
             reason="Inserted selector",
@@ -627,7 +678,6 @@ class B123dDockWidget(QtGui.QDockWidget):
 # -----------------------------------------------------------------------------
 _panel_instance = None
 
-
 def create_panel():
     global _panel_instance
     mw = FreeCADGui.getMainWindow()
@@ -643,7 +693,6 @@ def create_panel():
     mw.addDockWidget(QtCore.Qt.RightDockWidgetArea, _panel_instance)
     _panel_instance.show()
     return _panel_instance
-
 
 def toggle_panel():
     global _panel_instance
