@@ -11,6 +11,7 @@ from core.parser import inject_code_to_freecad, parse_variables
 from core.verifier import compare_shapes
 from core.shadow import ensure_shadow_object, Build123dShadow, Build123dViewProvider
 
+
 # -----------------------------------------------------------------------------
 # WIDGET CLASSES
 # -----------------------------------------------------------------------------
@@ -85,15 +86,21 @@ class B123dLiveSyncObserver:
 
 class B123dSelectionObserver:
     """
-    Watches 3D view selections. When user selects a Face### on a Part object,
+    Watches 3D view selections. When user selects a Face### / Edge### / Vertex###,
     compute build123d selector string using solve_selector() and expose it in the dock.
     """
     def __init__(self, panel):
         self.panel = panel
 
     def addSelection(self, doc, obj_name, sub, pos):
-        # Only face selection
-        if not sub or not sub.startswith("Face"):
+        if not sub:
+            return
+
+        # We only react to topological picks
+        is_face = sub.startswith("Face")
+        is_edge = sub.startswith("Edge")
+        is_vert = sub.startswith("Vertex")
+        if not (is_face or is_edge or is_vert):
             return
 
         fc_doc = FreeCAD.ActiveDocument
@@ -109,12 +116,21 @@ class B123dSelectionObserver:
             return
 
         try:
-            face = obj.getSubObject(sub)
-            selector = solve_selector(face)
+            topo = obj.getSubObject(sub)
+            selector = solve_selector(topo)
+
+            if is_face:
+                kind = "Face"
+            elif is_edge:
+                kind = "Edge"
+            else:
+                kind = "Vertex"
+
         except Exception:
             selector = None
+            kind = "Selection"
 
-        self.panel.set_selector_text(selector)
+        self.panel.set_selector_text(selector, kind=kind)
 
     def removeSelection(self, doc, obj_name, sub):
         pass
@@ -156,16 +172,16 @@ class B123dDockWidget(QtGui.QDockWidget):
         self.status.setStyleSheet("background: #dfd; padding: 5px; color: green;")
         l1.addWidget(self.status)
 
-        # --- Selection Tools UI (NEW) ---
+        # --- Selection Tools UI ---
         gb = QtGui.QGroupBox("Selection Tools")
         gl = QtGui.QVBoxLayout()
         gb.setLayout(gl)
 
-        self.sel_lbl = QtGui.QLabel("Select a Face in the 3D view...")
+        self.sel_lbl = QtGui.QLabel("Select a Face / Edge / Vertex in the 3D view...")
         self.sel_lbl.setStyleSheet("background: #eee; padding: 6px;")
         gl.addWidget(self.sel_lbl)
 
-        self.btn_insert_selector = QtGui.QPushButton("Insert Face Selector at Cursor")
+        self.btn_insert_selector = QtGui.QPushButton("Insert Selector at Cursor")
         self.btn_insert_selector.setEnabled(False)
         self.btn_insert_selector.clicked.connect(self.ins_selector_code)
         gl.addWidget(self.btn_insert_selector)
@@ -203,6 +219,7 @@ class B123dDockWidget(QtGui.QDockWidget):
         self.param_widgets = {}
         self.programmatic_update = False
         self.cur_sel = None
+        self.cur_sel_kind = None
 
         # Timers
         self.timer_gui_to_code = QtCore.QTimer()
@@ -235,23 +252,25 @@ class B123dDockWidget(QtGui.QDockWidget):
         super().closeEvent(e)
 
     # -------------------------------------------------------------------------
-    # Selection insert helpers (NEW)
+    # Selection insert helpers
     # -------------------------------------------------------------------------
-    def set_selector_text(self, selector_text):
+    def set_selector_text(self, selector_text, kind="Selection"):
         self.cur_sel = selector_text
+        self.cur_sel_kind = kind
 
         if selector_text:
-            self.sel_lbl.setText(selector_text)
+            self.sel_lbl.setText(f"{kind} selector:\n{selector_text}")
             self.sel_lbl.setStyleSheet("background: #ddf; padding: 6px; color: #1144aa;")
             self.btn_insert_selector.setEnabled(True)
         else:
-            self.sel_lbl.setText("Unsupported/complex face selection")
+            self.sel_lbl.setText(f"{kind} selection unsupported/complex")
             self.sel_lbl.setStyleSheet("background: #fdd; padding: 6px; color: #aa1111;")
             self.btn_insert_selector.setEnabled(False)
 
     def reset_selector_ui(self):
         self.cur_sel = None
-        self.sel_lbl.setText("Select a Face in the 3D view...")
+        self.cur_sel_kind = None
+        self.sel_lbl.setText("Select a Face / Edge / Vertex in the 3D view...")
         self.sel_lbl.setStyleSheet("background: #eee; padding: 6px;")
         self.btn_insert_selector.setEnabled(False)
 

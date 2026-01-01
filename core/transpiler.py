@@ -10,17 +10,26 @@ def fingerprint(edge):
         return None
 
 def solve_selector(geo_shape):
+    """
+    Return a build123d selector string for a FreeCAD subshape.
+    Supports: Vertex, Edge, Face. Returns None for Compound/unsupported.
+    """
     try:
         if geo_shape.ShapeType == "Compound":
             return None
 
+        # Use CenterOfMass consistently (works for Edge/Face, and usually Vertex too)
         c = geo_shape.CenterOfMass
         cx, cy, cz = round(c.x, 2), round(c.y, 2), round(c.z, 2)
+
+        if geo_shape.ShapeType == "Vertex":
+            # Pick closest vertex to this point
+            return f"part.vertices().sort_by_distance(({cx}, {cy}, {cz})).first"
 
         if geo_shape.ShapeType == "Edge":
             return f"part.edges().sort_by_distance(({cx}, {cy}, {cz})).first"
 
-        elif geo_shape.ShapeType == "Face":
+        if geo_shape.ShapeType == "Face":
             n = geo_shape.normalAt(0, 0)
             if abs(n.z) > 0.99:
                 return f"part.faces().sort_by(Axis.Z).{'last' if c.z > 0 else 'first'}"
@@ -61,7 +70,7 @@ def generate_smart_selector_code(selected_geoms, parent_obj):
     for axis, axis_name in [
         (FreeCAD.Base.Vector(1, 0, 0), "Axis.X"),
         (FreeCAD.Base.Vector(0, 1, 0), "Axis.Y"),
-        (FreeCAD.Base.Vector(0, 0, 1), "Axis.Z")
+        (FreeCAD.Base.Vector(0, 0, 1), "Axis.Z"),
     ]:
         a_prints = set()
         for e in total_edges:
