@@ -6,10 +6,79 @@ import FreeCADGui
 import re
 
 # Import logic from core
-from core.transpiler import transpile_object, solve_selector
+from core.transpiler import transpile_object
 from core.parser import inject_code_to_freecad, parse_variables
 from core.verifier import compare_shapes
-from core.shadow import ensure_shadow_object, Build123dShadow, Build123dViewProvider
+from core.shadow import ensure_shadow_object
+
+# -----------------------------------------------------------------------------
+# SELECTION -> BUILD123D SELECTOR HELPERS
+# -----------------------------------------------------------------------------
+def _round3(x):
+    try:
+        return round(float(x), 3)
+    except Exception:
+        return x
+
+def selector_for_vertex(vertex_shape):
+    """Return a build123d selector string for a vertex."""
+    try:
+        p = vertex_shape.Point
+        x, y, z = _round3(p.x), _round3(p.y), _round3(p.z)
+        return f"part.vertices().sort_by_distance(({x}, {y}, {z})).first"
+    except Exception:
+        return None
+
+def selector_for_edge(edge_shape):
+    """Return a build123d selector string for an edge (robust fallback)."""
+    try:
+        c = edge_shape.CenterOfMass
+        x, y, z = _round3(c.x), _round3(c.y), _round3(c.z)
+        return f"part.edges().sort_by_distance(({x}, {y}, {z})).first"
+    except Exception:
+        return None
+
+def selector_for_face(face_shape):
+    """
+    Return a build123d selector string for a face.
+
+    Heuristic:
+      - If face normal is axis-aligned, use sort_by(Axis.*).first/last
+      - Otherwise, fallback to sort_by_distance(center)
+    """
+    try:
+        c = face_shape.CenterOfMass
+        cx, cy, cz = round(c.x, 2), round(c.y, 2), round(c.z, 2)
+
+        # FreeCAD Face.normalAt needs (u,v); we can get u,v from surface parameters
+        uv = face_shape.Surface.parameter(c)
+        n = face_shape.normalAt(uv[0], uv[1])
+
+        # axis-aligned checks
+        if abs(n.z) > 0.99:
+            return f"part.faces().sort_by(Axis.Z).{'last' if c.z > 0 else 'first'}"
+        if abs(n.x) > 0.99:
+            return f"part.faces().sort_by(Axis.X).{'last' if c.x > 0 else 'first'}"
+        if abs(n.y) > 0.99:
+            return f"part.faces().sort_by(Axis.Y).{'last' if c.y > 0 else 'first'}"
+
+        return f"part.faces().sort_by_distance(({cx}, {cy}, {cz})).first"
+    except Exception:
+        return None
+
+def selector_from_subshape(subshape):
+    """Dispatch based on shape type."""
+    try:
+        st = getattr(subshape, "ShapeType", None)
+        if st == "Vertex":
+            return selector_for_vertex(subshape)
+        if st == "Edge":
+            return selector_for_edge(subshape)
+        if st == "Face":
+            return selector_for_face(subshape)
+        return None
+    except Exception:
+        return None
 
 
 # -----------------------------------------------------------------------------
@@ -61,8 +130,7 @@ class ParameterWidget(QtGui.QWidget):
         if self.scale_limit:
             new_val = (val / 1000.0) * self.scale_limit
         else:
-            new_val = val
-
+            new_val = float(val)
         self.val_lbl.setText(f"{new_val:.2f}")
         self.parent_dock.update_variable_from_slider(self.name, new_val)
 
@@ -74,6 +142,7 @@ class B123dLiveSyncObserver:
     def slotChangedObject(self, obj, prop):
         if self.panel.programmatic_update:
             return
+        # Ignore our own Shadow object to prevent loops
         if obj.TypeId.startswith("Part::") and obj.Name != "Build123d_Shadow":
             self.panel.trigger_gui_to_code_update()
 
@@ -84,63 +153,48 @@ class B123dLiveSyncObserver:
 
 
 class B123dSelectionObserver:
-    """
-    Watches 3D view selections. When user selects a Face### / Edge### / Vertex###,
-    compute build123d selector string using solve_selector() and expose it in the dock.
-    """
+    """Listens to selection changes and prepares selector text (button inserts it)."""
+
     def __init__(self, panel):
         self.panel = panel
 
     def addSelection(self, doc, obj_name, sub, pos):
-        if not sub:
-            return
-
-        is_face = sub.startswith("Face")
-        is_edge = sub.startswith("Edge")
-        is_vert = sub.startswith("Vertex")
-        if not (is_face or is_edge or is_vert):
-            return
-
-        fc_doc = FreeCAD.ActiveDocument
-        if not fc_doc:
-            return
-
-        obj = fc_doc.getObject(obj_name)
-        if not obj:
-            return
-
-        if obj.Name == "Build123d_Shadow":
-            return
-
-        kind = "Face" if is_face else ("Edge" if is_edge else "Vertex")
-
         try:
-            topo = obj.getSubObject(sub)
-            selector = solve_selector(topo)
-
-            # If selector is None, it's truly unsupported/complex
-            self.panel.set_selector_text(selector, kind=kind)
-
-        except Exception as e:
-            # Print the exception to the report view to make debugging easy
-            FreeCAD.Console.PrintError(f"[CodeCADStudio] Selection error ({kind}): {e}\n")
-            self.panel.set_selector_text(None, kind=kind)
+            if self.panel.programmatic_update:
+                return
+            self.panel.update_selector_from_current_selection()
+        except Exception:
+            pass
 
     def removeSelection(self, doc, obj_name, sub):
-        pass
-
-    def setPreselection(self, doc, obj_name, sub):
-        pass
+        try:
+            if self.panel.programmatic_update:
+                return
+            self.panel.update_selector_from_current_selection()
+        except Exception:
+            pass
 
     def clearSelection(self, doc):
-        self.panel.reset_selector_ui()
+        try:
+            if self.panel.programmatic_update:
+                return
+            self.panel.set_selector_text(None, hint="Select a face/edge/vertex…")
+        except Exception:
+            pass
+
+    def setPreselection(self, doc, obj_name, sub):
+        # optional: ignore preselection
+        pass
 
 
+# -----------------------------------------------------------------------------
+# MAIN DOCK
+# -----------------------------------------------------------------------------
 class B123dDockWidget(QtGui.QDockWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Code-CAD Studio")
-        self.resize(500, 700)
+        self.resize(520, 750)
 
         main = QtGui.QWidget()
         self.setWidget(main)
@@ -150,9 +204,9 @@ class B123dDockWidget(QtGui.QDockWidget):
         self.tabs = QtGui.QTabWidget()
         layout.addWidget(self.tabs)
 
-        # ---------------------------------------------------------------------
+        # -------------------------
         # EDITOR TAB
-        # ---------------------------------------------------------------------
+        # -------------------------
         t1 = QtGui.QWidget()
         l1 = QtGui.QVBoxLayout()
         t1.setLayout(l1)
@@ -161,31 +215,39 @@ class B123dDockWidget(QtGui.QDockWidget):
         self.editor.setFont(QtGui.QFont("Courier New", 10))
         l1.addWidget(self.editor)
 
+        # --- Modeling tools / selector insertion ---
+        tools = QtGui.QGroupBox("Modeling Tools")
+        tools_l = QtGui.QVBoxLayout()
+        tools.setLayout(tools_l)
+
+        self.sel_lbl = QtGui.QLabel("Select a face/edge/vertex…")
+        self.sel_lbl.setStyleSheet("background: #eee; padding: 6px;")
+        tools_l.addWidget(self.sel_lbl)
+
+        row = QtGui.QHBoxLayout()
+        self.btn_insert_selector = QtGui.QPushButton("Insert Selector")
+        self.btn_insert_selector.setEnabled(False)
+        self.btn_insert_selector.clicked.connect(self.insert_current_selector_at_cursor)
+
+        self.btn_clear_selection = QtGui.QPushButton("Clear Selection")
+        self.btn_clear_selection.clicked.connect(lambda: FreeCADGui.Selection.clearSelection())
+
+        row.addWidget(self.btn_insert_selector)
+        row.addWidget(self.btn_clear_selection)
+        tools_l.addLayout(row)
+
+        l1.addWidget(tools)
+
         self.status = QtGui.QLabel("Ready")
         self.status.setAlignment(QtCore.Qt.AlignCenter)
         self.status.setStyleSheet("background: #dfd; padding: 5px; color: green;")
         l1.addWidget(self.status)
 
-        gb = QtGui.QGroupBox("Selection Tools")
-        gl = QtGui.QVBoxLayout()
-        gb.setLayout(gl)
-
-        self.sel_lbl = QtGui.QLabel("Select a Face / Edge / Vertex in the 3D view...")
-        self.sel_lbl.setStyleSheet("background: #eee; padding: 6px;")
-        gl.addWidget(self.sel_lbl)
-
-        self.btn_insert_selector = QtGui.QPushButton("Insert Selector at Cursor")
-        self.btn_insert_selector.setEnabled(False)
-        self.btn_insert_selector.clicked.connect(self.ins_selector_code)
-        gl.addWidget(self.btn_insert_selector)
-
-        l1.addWidget(gb)
-
         self.tabs.addTab(t1, "Editor")
 
-        # ---------------------------------------------------------------------
+        # -------------------------
         # TUNER TAB
-        # ---------------------------------------------------------------------
+        # -------------------------
         t2 = QtGui.QWidget()
         l2 = QtGui.QVBoxLayout()
         t2.setLayout(l2)
@@ -199,22 +261,23 @@ class B123dDockWidget(QtGui.QDockWidget):
 
         self.tabs.addTab(t2, "Tuner")
 
-        # ---------------------------------------------------------------------
+        # -------------------------
         # VERIFICATION BAR
-        # ---------------------------------------------------------------------
+        # -------------------------
         self.verify_bar = QtGui.QLabel("UNVERIFIED")
         self.verify_bar.setAlignment(QtCore.Qt.AlignCenter)
         self.verify_bar.setFont(QtGui.QFont("Arial", 10, QtGui.QFont.Bold))
         self.verify_bar.setStyleSheet("background: #ccc; color: #555; padding: 8px;")
         layout.addWidget(self.verify_bar)
 
-        # State
+        # -------------------------
+        # STATE
+        # -------------------------
         self.param_widgets = {}
         self.programmatic_update = False
-        self.cur_sel = None
-        self.cur_sel_kind = None
+        self.current_selector_text = None
 
-        # Timers
+        # Debounce timers
         self.timer_gui_to_code = QtCore.QTimer()
         self.timer_gui_to_code.setSingleShot(True)
         self.timer_gui_to_code.timeout.connect(self.perform_gui_to_code)
@@ -223,21 +286,25 @@ class B123dDockWidget(QtGui.QDockWidget):
         self.timer_code_to_gui.setSingleShot(True)
         self.timer_code_to_gui.timeout.connect(self.perform_code_to_gui)
 
-        # Wiring
+        # Hooks
         self.editor.textChanged.connect(self.on_code_edited)
 
-        # Observers
         self.observer = B123dLiveSyncObserver(self)
         FreeCAD.addDocumentObserver(self.observer)
 
         self.sel_obs = B123dSelectionObserver(self)
         FreeCADGui.Selection.addObserver(self.sel_obs)
 
+        # Ensure shadow exists & populate editor from current GUI
         ensure_shadow_object()
         self.perform_gui_to_code()
+        self.update_selector_from_current_selection()
 
     def closeEvent(self, e):
-        FreeCAD.removeDocumentObserver(self.observer)
+        try:
+            FreeCAD.removeDocumentObserver(self.observer)
+        except Exception:
+            pass
         try:
             FreeCADGui.Selection.removeObserver(self.sel_obs)
         except Exception:
@@ -245,39 +312,81 @@ class B123dDockWidget(QtGui.QDockWidget):
         super().closeEvent(e)
 
     # -------------------------------------------------------------------------
-    # Selection insert helpers
+    # CENTRAL APPLY FUNCTION (THE ARCHITECTURE CHANGE)
     # -------------------------------------------------------------------------
-    def set_selector_text(self, selector_text, kind="Selection"):
-        self.cur_sel = selector_text
-        self.cur_sel_kind = kind
+    def apply_code(
+        self,
+        new_code: str,
+        *,
+        reason: str = "",
+        update_editor: bool = True,
+        update_freecad: bool = True,
+        update_shadow: bool = True,
+        schedule_verify: bool = True,
+        verify_delay_ms: int = 120,
+    ):
+        """
+        Single source of truth for applying code changes.
 
-        if selector_text:
-            self.sel_lbl.setText(f"{kind} selector:\n{selector_text}")
-            self.sel_lbl.setStyleSheet("background: #ddf; padding: 6px; color: #1144aa;")
-            self.btn_insert_selector.setEnabled(True)
-        else:
-            self.sel_lbl.setText(f"{kind} selection unsupported/complex")
-            self.sel_lbl.setStyleSheet("background: #fdd; padding: 6px; color: #aa1111;")
-            self.btn_insert_selector.setEnabled(False)
-
-    def reset_selector_ui(self):
-        self.cur_sel = None
-        self.cur_sel_kind = None
-        self.sel_lbl.setText("Select a Face / Edge / Vertex in the 3D view...")
-        self.sel_lbl.setStyleSheet("background: #eee; padding: 6px;")
-        self.btn_insert_selector.setEnabled(False)
-
-    def ins_selector_code(self):
-        if not self.cur_sel:
+        Routes ALL:
+          - typing debounce finalization
+          - slider changes
+          - selector insertion button
+          - GUI->Code transpile updates (with update_freecad=False)
+        """
+        if not new_code:
             return
-        cursor = self.editor.textCursor()
-        cursor.insertText(self.cur_sel)
-        self.editor.setTextCursor(cursor)
-        self.editor.setFocus()
+
+        self.programmatic_update = True
+        try:
+            if reason:
+                self.status.setText(reason)
+                self.status.setStyleSheet("background: #fff4cc; color: #a86b00; padding: 5px;")
+
+            if update_editor:
+                self.editor.blockSignals(True)
+                try:
+                    self.editor.setPlainText(new_code)
+                finally:
+                    self.editor.blockSignals(False)
+
+            msg = "OK"
+            if update_freecad:
+                success, msg = inject_code_to_freecad(new_code)
+                # When syntax/runtime error: still update status, but don't hard crash
+                if msg == "Syntax Error":
+                    self.status.setText("Syntax Error")
+                    self.status.setStyleSheet("background: #fdd; color: red; padding: 5px;")
+                elif isinstance(msg, str) and msg.startswith("Runtime Error"):
+                    self.status.setText(msg)
+                    self.status.setStyleSheet("background: #fdd; color: red; padding: 5px;")
+                else:
+                    self.status.setText(msg)
+                    self.status.setStyleSheet("background: #dfd; color: green; padding: 5px;")
+
+            if update_shadow:
+                shadow = ensure_shadow_object()
+                if shadow:
+                    shadow.Code = new_code
+                    shadow.touch()
+
+            if schedule_verify:
+                QtCore.QTimer.singleShot(verify_delay_ms, self.deferred_verification)
+
+        except Exception as e:
+            self.status.setText(f"Error: {e}")
+            self.status.setStyleSheet("background: #fdd; color: red; padding: 5px;")
+        finally:
+            self.programmatic_update = False
 
     # -------------------------------------------------------------------------
-    # Core model picking
+    # GUI -> CODE (FreeCAD tree to build123d)
     # -------------------------------------------------------------------------
+    def trigger_gui_to_code_update(self):
+        self.status.setText("Reading FreeCAD…")
+        self.status.setStyleSheet("background: #ddf; color: blue; padding: 5px;")
+        self.timer_gui_to_code.start(800)
+
     def find_tip_object(self):
         doc = FreeCAD.ActiveDocument
         if not doc:
@@ -305,44 +414,59 @@ class B123dDockWidget(QtGui.QDockWidget):
         leaves = [c for c in candidates if c not in parents]
         return leaves[-1] if leaves else None
 
-    # -------------------------------------------------------------------------
-    # PATH A: GUI -> CODE
-    # -------------------------------------------------------------------------
-    def trigger_gui_to_code_update(self):
-        self.status.setText("Reading FreeCAD...")
-        self.status.setStyleSheet("background: #ddf; color: blue;")
-        self.timer_gui_to_code.start(800)
-
     def perform_gui_to_code(self):
         tip = self.find_tip_object()
         if not tip:
             return
 
-        self.programmatic_update = True
-        self.editor.blockSignals(True)
-
         try:
             code = "from build123d import *\n\n" + transpile_object(tip)
-            self.editor.setPlainText(code)
 
-            shadow = ensure_shadow_object()
-            if shadow:
-                shadow.Code = code
-                shadow.touch()
-                QtCore.QTimer.singleShot(200, self.deferred_verification)
+            # IMPORTANT: GUI->Code should NOT inject back into FreeCAD
+            # (the GUI tree is the source of truth in this direction)
+            self.apply_code(
+                code,
+                reason="Synced (GUI → Code)",
+                update_editor=True,
+                update_freecad=False,
+                update_shadow=True,
+                schedule_verify=True,
+                verify_delay_ms=120,
+            )
 
             self.refresh_tuner_ui()
-            self.status.setText("Synced (GUI -> Code)")
-            self.status.setStyleSheet("background: #dfd; color: green;")
-
         except Exception as e:
             self.status.setText(f"Transpile Error: {e}")
-            self.status.setStyleSheet("background: #fdd; color: red;")
+            self.status.setStyleSheet("background: #fdd; color: red; padding: 5px;")
 
-        finally:
-            self.editor.blockSignals(False)
-            self.programmatic_update = False
+    # -------------------------------------------------------------------------
+    # CODE -> GUI (editor/slider/selector changes)
+    # -------------------------------------------------------------------------
+    def on_code_edited(self):
+        if self.programmatic_update:
+            return
+        self.status.setText("Writing…")
+        self.status.setStyleSheet("background: #fff4cc; color: orange; padding: 5px;")
+        self.timer_code_to_gui.start(800)
+        self.refresh_tuner_ui()
 
+    def perform_code_to_gui(self):
+        # Editor already has the code, so don't set it again
+        code = self.editor.toPlainText()
+        self.apply_code(
+            code,
+            reason="Applying code…",
+            update_editor=False,
+            update_freecad=True,
+            update_shadow=True,
+            schedule_verify=True,
+            verify_delay_ms=120,
+        )
+        self.refresh_tuner_ui()
+
+    # -------------------------------------------------------------------------
+    # Verification (deferred)
+    # -------------------------------------------------------------------------
     def deferred_verification(self):
         try:
             FreeCAD.ActiveDocument.recompute()
@@ -350,47 +474,8 @@ class B123dDockWidget(QtGui.QDockWidget):
             shadow = ensure_shadow_object()
             self.run_verification(tip, shadow)
         except Exception:
+            # Document may be busy
             pass
-
-    # -------------------------------------------------------------------------
-    # PATH B: CODE -> GUI
-    # -------------------------------------------------------------------------
-    def on_code_edited(self):
-        if self.programmatic_update:
-            return
-        self.status.setText("Writing...")
-        self.status.setStyleSheet("background: #fff4cc; color: orange;")
-        self.timer_code_to_gui.start(800)
-        self.refresh_tuner_ui()
-
-    def perform_code_to_gui(self):
-        code = self.editor.toPlainText()
-        self.programmatic_update = True
-        try:
-            success, msg = inject_code_to_freecad(code)
-
-            if success or msg != "Syntax Error":
-                shadow = ensure_shadow_object()
-                if shadow:
-                    shadow.Code = code
-                    shadow.touch()
-                    QtCore.QTimer.singleShot(100, self.deferred_verification)
-
-            if msg == "Syntax Error":
-                self.status.setText("Syntax Error")
-                self.status.setStyleSheet("background: #fdd; color: red;")
-            elif msg.startswith("Runtime Error"):
-                self.status.setText(msg)
-                self.status.setStyleSheet("background: #fdd; color: red;")
-            else:
-                self.status.setText(msg)
-                self.status.setStyleSheet("background: #dfd; color: green;")
-
-        except Exception as e:
-            self.status.setText(f"Error: {e}")
-            self.status.setStyleSheet("background: #fdd; color: red;")
-        finally:
-            self.programmatic_update = False
 
     def run_verification(self, tip, shadow):
         if not tip or not shadow:
@@ -398,26 +483,32 @@ class B123dDockWidget(QtGui.QDockWidget):
         success, reason = compare_shapes(tip, shadow)
         if success:
             self.verify_bar.setText("MATCH CONFIRMED")
-            self.verify_bar.setStyleSheet("background: #dfd; color: green; padding: 8px; border: 2px solid green;")
+            self.verify_bar.setStyleSheet(
+                "background: #dfd; color: green; padding: 8px; border: 2px solid green;"
+            )
         else:
             self.verify_bar.setText(f"MISMATCH: {reason}")
-            self.verify_bar.setStyleSheet("background: #fdd; color: red; padding: 8px; border: 2px solid red;")
+            self.verify_bar.setStyleSheet(
+                "background: #fdd; color: red; padding: 8px; border: 2px solid red;"
+            )
 
     # -------------------------------------------------------------------------
-    # TUNER LOGIC
+    # TUNER LOGIC (variables -> sliders)
     # -------------------------------------------------------------------------
     def refresh_tuner_ui(self):
         current_vars = parse_variables(self.editor.toPlainText())
-        current_names = set(v['name'] for v in current_vars)
-        vals = [v['value'] for v in current_vars]
+        current_names = set(v["name"] for v in current_vars)
+        vals = [v["value"] for v in current_vars]
         if not vals:
             return
 
         max_val = max(vals)
         min_val = min(vals)
+
         use_common_scale = True
         if min_val > 0 and (max_val / min_val > 100):
             use_common_scale = False
+
         scale_limit = max_val * 1.5 if use_common_scale else None
 
         for name in list(self.param_widgets.keys()):
@@ -426,9 +517,9 @@ class B123dDockWidget(QtGui.QDockWidget):
                 del self.param_widgets[name]
 
         for v in current_vars:
-            name = v['name']
-            val = v['value']
-            this_limit = scale_limit if scale_limit else val * 2.0
+            name = v["name"]
+            val = v["value"]
+            this_limit = scale_limit if scale_limit else (val * 2.0 if val != 0 else 1.0)
 
             if name in self.param_widgets:
                 self.param_widgets[name].update_state(val, this_limit)
@@ -439,39 +530,103 @@ class B123dDockWidget(QtGui.QDockWidget):
 
     def update_variable_from_slider(self, name, val):
         code = self.editor.toPlainText()
-        lines = code.split('\n')
-        pattern = re.compile(rf"^({name})\s*=\s*([-+]?[0-9]*\.?[0-9]+)(.*)$")
+        lines = code.split("\n")
+        pattern = re.compile(rf"^({re.escape(name)})\s*=\s*([-+]?[0-9]*\.?[0-9]+)(.*)$")
 
         new_lines = []
         for line in lines:
-            match = pattern.match(line.strip())
-            if match:
-                new_lines.append(f"{name} = {val:.2f}{match.group(3)}")
+            m = pattern.match(line.strip())
+            if m:
+                new_lines.append(f"{name} = {val:.2f}{m.group(3)}")
             else:
                 new_lines.append(line)
 
-        new_code = '\n'.join(new_lines)
+        new_code = "\n".join(new_lines)
 
-        self.programmatic_update = True
-        self.editor.blockSignals(True)
-        self.editor.setPlainText(new_code)
-        self.editor.blockSignals(False)
+        # Use the central apply function so sliders *always* propagate
+        self.apply_code(
+            new_code,
+            reason=f"Slider: {name}",
+            update_editor=True,
+            update_freecad=True,
+            update_shadow=True,
+            schedule_verify=True,
+            verify_delay_ms=80,
+        )
 
+        # Keep tuner UI values in sync after slider edit
+        self.refresh_tuner_ui()
+
+    # -------------------------------------------------------------------------
+    # Selector insertion (button-driven)
+    # -------------------------------------------------------------------------
+    def set_selector_text(self, text, hint=None):
+        self.current_selector_text = text
+        if text:
+            self.sel_lbl.setText(text)
+            self.sel_lbl.setStyleSheet("background: #ddf; color: #003399; padding: 6px;")
+            self.btn_insert_selector.setEnabled(True)
+        else:
+            self.sel_lbl.setText(hint or "Selection unsupported/complex")
+            self.sel_lbl.setStyleSheet("background: #f5f5f5; color: #666; padding: 6px;")
+            self.btn_insert_selector.setEnabled(False)
+
+    def update_selector_from_current_selection(self):
         try:
-            inject_code_to_freecad(new_code)
-            shadow = ensure_shadow_object()
-            if shadow:
-                shadow.Code = new_code
-                shadow.touch()
-                QtCore.QTimer.singleShot(50, self.deferred_verification)
-        finally:
-            self.programmatic_update = False
+            sel = FreeCADGui.Selection.getSelectionEx()
+            if not sel:
+                self.set_selector_text(None, hint="Select a face/edge/vertex…")
+                return
+
+            # Use first selected sub-element (keep simple)
+            s0 = sel[0]
+            if not s0.SubElementNames:
+                self.set_selector_text(None, hint="Select a face/edge/vertex…")
+                return
+
+            obj = s0.Object
+            subname = s0.SubElementNames[0]
+
+            # FreeCAD can return "Vertex1", "Edge3", "Face6", etc.
+            subshape = obj.getSubObject(subname)
+            if not subshape:
+                self.set_selector_text(None, hint="Selection unsupported/complex")
+                return
+
+            code = selector_from_subshape(subshape)
+            if not code:
+                self.set_selector_text(None, hint="Selection unsupported/complex")
+                return
+
+            self.set_selector_text(code)
+        except Exception:
+            self.set_selector_text(None, hint="Selection unsupported/complex")
+
+    def insert_current_selector_at_cursor(self):
+        if not self.current_selector_text:
+            return
+
+        cursor = self.editor.textCursor()
+        cursor.insertText(self.current_selector_text)
+
+        # Apply immediately (don’t rely on debounce for button-driven actions)
+        self.apply_code(
+            self.editor.toPlainText(),
+            reason="Inserted selector",
+            update_editor=False,
+            update_freecad=True,
+            update_shadow=True,
+            schedule_verify=True,
+            verify_delay_ms=80,
+        )
+        self.refresh_tuner_ui()
 
 
 # -----------------------------------------------------------------------------
 # WORKBENCH LAUNCHER
 # -----------------------------------------------------------------------------
 _panel_instance = None
+
 
 def create_panel():
     global _panel_instance
@@ -488,6 +643,7 @@ def create_panel():
     mw.addDockWidget(QtCore.Qt.RightDockWidgetArea, _panel_instance)
     _panel_instance.show()
     return _panel_instance
+
 
 def toggle_panel():
     global _panel_instance
