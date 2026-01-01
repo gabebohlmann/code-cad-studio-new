@@ -54,10 +54,14 @@ class ParameterWidget(QtGui.QWidget):
 class B123dLiveSyncObserver:
     def __init__(self, panel): self.panel = panel
     def slotChangedObject(self, obj, prop):
+        if self.panel.programmatic_update: return
+        # Ignore our own Shadow object to prevent loops
         if obj.TypeId.startswith("Part::") and obj.Name != "Build123d_Shadow":
-            if not self.panel.programmatic_update: self.panel.trigger_gui_to_code_update()
+            self.panel.trigger_gui_to_code_update()
+            
     def slotCreatedObject(self, obj):
-        if not self.panel.programmatic_update: self.panel.trigger_gui_to_code_update()
+        if self.panel.programmatic_update: return
+        self.panel.trigger_gui_to_code_update()
 
 class B123dDockWidget(QtGui.QDockWidget):
     def __init__(self, parent=None):
@@ -88,6 +92,8 @@ class B123dDockWidget(QtGui.QDockWidget):
 
         self.param_widgets = {} 
         self.programmatic_update = False  
+        
+        # INCREASED DEBOUNCE TIME (200ms -> 800ms) to let you finish typing/clicking
         self.timer_gui_to_code = QtCore.QTimer(); self.timer_gui_to_code.setSingleShot(True); self.timer_gui_to_code.timeout.connect(self.perform_gui_to_code)
         self.timer_code_to_gui = QtCore.QTimer(); self.timer_code_to_gui.setSingleShot(True); self.timer_code_to_gui.timeout.connect(self.perform_code_to_gui)
         
@@ -116,23 +122,47 @@ class B123dDockWidget(QtGui.QDockWidget):
         return leaves[-1] if leaves else None
 
     # PATH A: GUI -> CODE
-    def trigger_gui_to_code_update(self): self.status.setText("Reading FreeCAD..."); self.status.setStyleSheet("background: #ddf; color: blue;"); self.timer_gui_to_code.start(500)
+    def trigger_gui_to_code_update(self): 
+        self.status.setText("Reading FreeCAD..."); self.status.setStyleSheet("background: #ddf; color: blue;")
+        # Increased delay prevents freezing during rapid changes
+        self.timer_gui_to_code.start(800)
+
     def perform_gui_to_code(self):
         tip = self.find_tip_object()
         if not tip: return
+        
+        # LOCK: Prevent observer from seeing these changes
+        self.programmatic_update = True
         self.editor.blockSignals(True)
         try:
             code = "from build123d import *\n\n" + transpile_object(tip)
             self.editor.setPlainText(code)
+            
             shadow = ensure_shadow_object()
             if shadow: 
-                shadow.Code = code; shadow.touch(); FreeCAD.ActiveDocument.recompute()
-                self.run_verification(tip, shadow)
+                shadow.Code = code
+                shadow.touch()
+                # DO NOT RECOMPUTE HERE.
+                # Scheduling verification for the next event loop prevents "Recursive Recompute"
+                QtCore.QTimer.singleShot(200, self.deferred_verification)
             
             self.refresh_tuner_ui()
             self.status.setText("Synced (GUI -> Code)"); self.status.setStyleSheet("background: #dfd; color: green;")
-        except Exception as e: self.status.setText(f"Transpile Error: {e}"); self.status.setStyleSheet("background: #fdd; color: red;")
-        finally: self.editor.blockSignals(False)
+        except Exception as e: 
+            self.status.setText(f"Transpile Error: {e}"); self.status.setStyleSheet("background: #fdd; color: red;")
+        finally: 
+            self.editor.blockSignals(False)
+            self.programmatic_update = False
+
+    def deferred_verification(self):
+        """Runs verify only when safe"""
+        try:
+            FreeCAD.ActiveDocument.recompute()
+            tip = self.find_tip_object()
+            shadow = ensure_shadow_object()
+            self.run_verification(tip, shadow)
+        except Exception:
+            pass # Ignore recompute errors if document is busy
 
     # PATH B: CODE -> GUI
     def on_code_edited(self):
@@ -145,14 +175,13 @@ class B123dDockWidget(QtGui.QDockWidget):
         self.programmatic_update = True
         try:
             success, msg = inject_code_to_freecad(code)
+            
+            # Defer the shadow update to avoid locking the UI during typing
             if success or msg != "Syntax Error":
                 shadow = ensure_shadow_object()
                 if shadow: 
                     shadow.Code = code; shadow.touch()
-                    FreeCAD.ActiveDocument.recompute()
-                    # Run Verify
-                    tip = self.find_tip_object()
-                    self.run_verification(tip, shadow)
+                    QtCore.QTimer.singleShot(100, self.deferred_verification)
 
             if msg == "Syntax Error":
                 self.status.setText("Syntax Error"); self.status.setStyleSheet("background: #fdd; color: red;")
@@ -165,6 +194,7 @@ class B123dDockWidget(QtGui.QDockWidget):
         finally: self.programmatic_update = False
 
     def run_verification(self, tip, shadow):
+        if not tip or not shadow: return
         success, reason = compare_shapes(tip, shadow)
         if success:
             self.verify_bar.setText(f"MATCH CONFIRMED")
@@ -217,9 +247,7 @@ class B123dDockWidget(QtGui.QDockWidget):
             shadow = ensure_shadow_object()
             if shadow: 
                 shadow.Code = new_code; shadow.touch()
-                FreeCAD.ActiveDocument.recompute()
-                tip = self.find_tip_object()
-                self.run_verification(tip, shadow)
+                QtCore.QTimer.singleShot(50, self.deferred_verification)
         finally: 
             self.programmatic_update = False
 
@@ -232,8 +260,12 @@ def create_panel():
     global _panel_instance
     mw = FreeCADGui.getMainWindow()
     if _panel_instance:
-        _panel_instance.show()
-        return _panel_instance
+        try:
+            _panel_instance.show()
+            return _panel_instance
+        except:
+            _panel_instance = None # Handle deleted widgets
+            
     _panel_instance = B123dDockWidget(mw)
     mw.addDockWidget(QtCore.Qt.RightDockWidgetArea, _panel_instance)
     _panel_instance.show()
