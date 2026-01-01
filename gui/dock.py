@@ -3,6 +3,7 @@
 from PySide import QtGui, QtCore
 import FreeCAD
 import FreeCADGui
+import re 
 
 # Import logic from core
 from core.transpiler import transpile_object
