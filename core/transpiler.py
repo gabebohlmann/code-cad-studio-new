@@ -9,38 +9,95 @@ def fingerprint(edge):
     except:
         return None
 
+
+def _safe_center(geo_shape):
+    """
+    Robustly get a point-like center for Vertex/Edge/Face objects returned by FreeCAD.
+    - Part.Vertex often has .Point (but may not have CenterOfMass reliably)
+    - Part.Shape of ShapeType 'Vertex' may expose Vertexes[0].Point
+    """
+    # 1) Direct vertex point (common for Part.Vertex)
+    if hasattr(geo_shape, "Point"):
+        try:
+            return geo_shape.Point
+        except:
+            pass
+
+    # 2) CenterOfMass (common for Edge/Face/Solid)
+    if hasattr(geo_shape, "CenterOfMass"):
+        try:
+            return geo_shape.CenterOfMass
+        except:
+            pass
+
+    # 3) If it's a Part.Shape wrapper with Vertexes list
+    if hasattr(geo_shape, "Vertexes"):
+        try:
+            if geo_shape.Vertexes and hasattr(geo_shape.Vertexes[0], "Point"):
+                return geo_shape.Vertexes[0].Point
+        except:
+            pass
+
+    # 4) Fallback to bounding box center
+    if hasattr(geo_shape, "BoundBox"):
+        try:
+            return geo_shape.BoundBox.Center
+        except:
+            pass
+
+    return None
+
+
 def solve_selector(geo_shape):
     """
     Return a build123d selector string for a FreeCAD subshape.
     Supports: Vertex, Edge, Face. Returns None for Compound/unsupported.
+
+    NOTE: Vertex selection previously failed because some FreeCAD vertex objects
+    don't provide CenterOfMass reliably; we now use .Point / Vertexes[0].Point.
     """
     try:
-        if geo_shape.ShapeType == "Compound":
+        # Some subobjects can be returned as None
+        if not geo_shape:
             return None
 
-        # Use CenterOfMass consistently (works for Edge/Face, and usually Vertex too)
-        c = geo_shape.CenterOfMass
+        # Compounds are ambiguous for selector generation
+        if getattr(geo_shape, "ShapeType", None) == "Compound":
+            return None
+
+        st = getattr(geo_shape, "ShapeType", None)
+        c = _safe_center(geo_shape)
+        if c is None:
+            return None
+
         cx, cy, cz = round(c.x, 2), round(c.y, 2), round(c.z, 2)
 
-        if geo_shape.ShapeType == "Vertex":
-            # Pick closest vertex to this point
+        if st == "Vertex":
             return f"part.vertices().sort_by_distance(({cx}, {cy}, {cz})).first"
 
-        if geo_shape.ShapeType == "Edge":
+        if st == "Edge":
             return f"part.edges().sort_by_distance(({cx}, {cy}, {cz})).first"
 
-        if geo_shape.ShapeType == "Face":
-            n = geo_shape.normalAt(0, 0)
-            if abs(n.z) > 0.99:
-                return f"part.faces().sort_by(Axis.Z).{'last' if c.z > 0 else 'first'}"
-            if abs(n.x) > 0.99:
-                return f"part.faces().sort_by(Axis.X).{'last' if c.x > 0 else 'first'}"
-            if abs(n.y) > 0.99:
-                return f"part.faces().sort_by(Axis.Y).{'last' if c.y > 0 else 'first'}"
+        if st == "Face":
+            # Prefer axis-aligned face selectors when possible
+            try:
+                n = geo_shape.normalAt(0, 0)
+                if abs(n.z) > 0.99:
+                    return f"part.faces().sort_by(Axis.Z).{'last' if c.z > 0 else 'first'}"
+                if abs(n.x) > 0.99:
+                    return f"part.faces().sort_by(Axis.X).{'last' if c.x > 0 else 'first'}"
+                if abs(n.y) > 0.99:
+                    return f"part.faces().sort_by(Axis.Y).{'last' if c.y > 0 else 'first'}"
+            except:
+                pass
             return f"part.faces().sort_by_distance(({cx}, {cy}, {cz})).first"
+
+        # Unsupported ShapeType (Wire/Solid/etc.) for now
+        return None
 
     except:
         return None
+
 
 def generate_smart_selector_code(selected_geoms, parent_obj):
     if not selected_geoms:
@@ -99,6 +156,7 @@ def generate_smart_selector_code(selected_geoms, parent_obj):
 
     return selectors
 
+
 def get_geometry_from_links(obj, parent):
     geoms = []
     names = []
@@ -117,6 +175,7 @@ def get_geometry_from_links(obj, parent):
                 geoms.append(g)
 
     return geoms
+
 
 def transpile_object(obj):
     header = f"# {obj.Name}\n"

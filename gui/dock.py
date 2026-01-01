@@ -74,7 +74,6 @@ class B123dLiveSyncObserver:
     def slotChangedObject(self, obj, prop):
         if self.panel.programmatic_update:
             return
-        # Ignore our own Shadow object to prevent loops
         if obj.TypeId.startswith("Part::") and obj.Name != "Build123d_Shadow":
             self.panel.trigger_gui_to_code_update()
 
@@ -96,7 +95,6 @@ class B123dSelectionObserver:
         if not sub:
             return
 
-        # We only react to topological picks
         is_face = sub.startswith("Face")
         is_edge = sub.startswith("Edge")
         is_vert = sub.startswith("Vertex")
@@ -111,26 +109,22 @@ class B123dSelectionObserver:
         if not obj:
             return
 
-        # Ignore shadow object
         if obj.Name == "Build123d_Shadow":
             return
+
+        kind = "Face" if is_face else ("Edge" if is_edge else "Vertex")
 
         try:
             topo = obj.getSubObject(sub)
             selector = solve_selector(topo)
 
-            if is_face:
-                kind = "Face"
-            elif is_edge:
-                kind = "Edge"
-            else:
-                kind = "Vertex"
+            # If selector is None, it's truly unsupported/complex
+            self.panel.set_selector_text(selector, kind=kind)
 
-        except Exception:
-            selector = None
-            kind = "Selection"
-
-        self.panel.set_selector_text(selector, kind=kind)
+        except Exception as e:
+            # Print the exception to the report view to make debugging easy
+            FreeCAD.Console.PrintError(f"[CodeCADStudio] Selection error ({kind}): {e}\n")
+            self.panel.set_selector_text(None, kind=kind)
 
     def removeSelection(self, doc, obj_name, sub):
         pass
@@ -172,7 +166,6 @@ class B123dDockWidget(QtGui.QDockWidget):
         self.status.setStyleSheet("background: #dfd; padding: 5px; color: green;")
         l1.addWidget(self.status)
 
-        # --- Selection Tools UI ---
         gb = QtGui.QGroupBox("Selection Tools")
         gl = QtGui.QVBoxLayout()
         gb.setLayout(gl)
@@ -275,7 +268,6 @@ class B123dDockWidget(QtGui.QDockWidget):
         self.btn_insert_selector.setEnabled(False)
 
     def ins_selector_code(self):
-        """Insert the current selector code at the editor cursor."""
         if not self.cur_sel:
             return
         cursor = self.editor.textCursor()
@@ -352,7 +344,6 @@ class B123dDockWidget(QtGui.QDockWidget):
             self.programmatic_update = False
 
     def deferred_verification(self):
-        """Runs verify only when safe"""
         try:
             FreeCAD.ActiveDocument.recompute()
             tip = self.find_tip_object()
