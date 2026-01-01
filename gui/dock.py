@@ -1,3 +1,5 @@
+# gui/dock.py
+
 from PySide import QtGui, QtCore
 import FreeCAD
 import FreeCADGui

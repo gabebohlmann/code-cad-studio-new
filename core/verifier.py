@@ -1,3 +1,5 @@
+# core/verifier.py
+
 import FreeCAD
 
 def compare_shapes(fc_obj, shadow_obj):

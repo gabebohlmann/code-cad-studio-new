@@ -1,3 +1,5 @@
+# InitGui.py
+
 import FreeCAD
 import FreeCADGui
 import sys

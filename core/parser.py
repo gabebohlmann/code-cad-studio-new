@@ -1,3 +1,5 @@
+# core/parser.py
+
 import FreeCAD
 import re
 

@@ -1,3 +1,5 @@
+# core/transpiler.py
+
 import FreeCAD
 
 def fingerprint(edge):

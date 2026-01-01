@@ -1,3 +1,5 @@
+# gui/commands.py
+
 import FreeCAD
 import FreeCADGui
 import gui.dock
