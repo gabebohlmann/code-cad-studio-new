@@ -1,25 +1,115 @@
-# core/shadow.py
-
 import FreeCAD
 import FreeCAD.Part as PartModule
 import tempfile
 import os
 
+
+def _get_location_obj(bobj):
+    """
+    Try to extract a build123d Location-like object from common attribute names.
+    build123d has historically used .location and also introduced .global_location.
+    """
+    loc = None
+    if hasattr(bobj, "global_location"):
+        try:
+            loc = bobj.global_location
+        except Exception:
+            loc = None
+    if loc is None and hasattr(bobj, "location"):
+        try:
+            loc = bobj.location
+        except Exception:
+            loc = None
+    return loc
+
+
+def _bake_location_into_wrapped(bobj):
+    """
+    Return a TopoDS_Shape with location baked into geometry so BREP export preserves transforms.
+
+    Why: build123d exporters often write `obj.wrapped` which may not include `obj.location`
+    transforms in a baked way. This makes translation/rotation via Pos/Rot appear to do nothing
+    in your shadow.
+    """
+    if not hasattr(bobj, "wrapped"):
+        return None
+
+    shape = bobj.wrapped
+    loc = _get_location_obj(bobj)
+    if loc is None:
+        return shape
+
+    # build123d Location usually wraps an OCCT TopLoc_Location in `loc.wrapped`
+    toploc = None
+    if hasattr(loc, "wrapped"):
+        try:
+            toploc = loc.wrapped
+        except Exception:
+            toploc = None
+
+    if toploc is None:
+        return shape
+
+    try:
+        # TopLoc_Location -> gp_Trsf
+        trsf = toploc.Transformation()
+
+        # Bake into geometry (not just a Location tag)
+        from OCP.BRepBuilderAPI import BRepBuilderAPI_Transform
+
+        # copy=True to avoid mutating source
+        xform = BRepBuilderAPI_Transform(shape, trsf, True)
+        baked = xform.Shape()
+        return baked
+    except Exception:
+        # If anything goes wrong, fall back to raw wrapped
+        return shape
+
+
 def save_any_shape(obj, path):
-    if hasattr(obj, "part"): obj = obj.part
-    elif hasattr(obj, "sketch"): obj = obj.sketch
+    """
+    Save build123d objects to BREP, preserving transforms (Pos/Rot) by baking location.
+
+    Supports:
+      - obj.part / obj.sketch wrapping
+      - obj.wrapped (TopoDS_Shape)
+      - obj.export_brep as fallback, but we prefer our own writer so we don't lose location
+    """
+    # Unwrap common build123d containers
+    if hasattr(obj, "part"):
+        obj = obj.part
+    elif hasattr(obj, "sketch"):
+        obj = obj.sketch
+
+    # Preferred: bake location into wrapped and write with BRepTools
+    baked = _bake_location_into_wrapped(obj)
+    if baked is not None:
+        try:
+            from OCP.BRepTools import BRepTools
+            BRepTools.Write_s(baked, path)
+            return True
+        except Exception:
+            pass
+
+    # Fallback: try build123d's own export_brep
     if hasattr(obj, "export_brep"):
         try:
             obj.export_brep(path)
             return True
-        except: pass
+        except Exception:
+            pass
+
+    # Last resort: write raw wrapped (may lose location)
     if hasattr(obj, "wrapped"):
         try:
             from OCP.BRepTools import BRepTools
             BRepTools.Write_s(obj.wrapped, path)
             return True
-        except: pass
+        except Exception:
+            pass
+
     return False
+
 
 class Build123dShadow:
     def __init__(self, obj):
@@ -29,41 +119,67 @@ class Build123dShadow:
 
     def execute(self, obj):
         # Silent Syntax Check
-        try: compile(obj.Code, '<string>', 'exec')
-        except SyntaxError: return 
+        try:
+            compile(obj.Code, "<string>", "exec")
+        except SyntaxError:
+            return
 
         try:
             local_env = {}
             exec("from build123d import *", local_env)
             exec(obj.Code, local_env)
-            if 'part' in local_env:
-                raw_obj = local_env['part']
-                fd, temp_path = tempfile.mkstemp(suffix=".brep")
-                os.close(fd)
-                try:
-                    success = save_any_shape(raw_obj, temp_path)
-                    if success:
-                        new_shape = PartModule.Shape()
-                        new_shape.read(temp_path)
-                        new_shape.translate(FreeCAD.Base.Vector(60, 0, 0)) 
-                        obj.Shape = new_shape
-                finally:
-                    if os.path.exists(temp_path): os.remove(temp_path)
+
+            if "part" not in local_env:
+                return
+
+            raw_obj = local_env["part"]
+
+            fd, temp_path = tempfile.mkstemp(suffix=".brep")
+            os.close(fd)
+
+            try:
+                success = save_any_shape(raw_obj, temp_path)
+                if success:
+                    new_shape = PartModule.Shape()
+                    new_shape.read(temp_path)
+
+                    # keep your display offset to the side
+                    new_shape.translate(FreeCAD.Base.Vector(60, 0, 0))
+
+                    obj.Shape = new_shape
+            finally:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+
         except Exception:
+            # Keeping your previous “silent fail” behavior,
+            # but if you want debugging later, print the exception here.
             pass
 
     def onChanged(self, obj, prop):
-        if prop == "Code": obj.touch()
+        if prop == "Code":
+            obj.touch()
+
 
 class Build123dViewProvider:
-    def __init__(self, vobj): vobj.Proxy = self
-    def getIcon(self): return ":/icons/Part_Feature.svg"
-    def attach(self, vobj): self.ViewObject = vobj
-    def updateData(self, fp, prop): pass
+    def __init__(self, vobj):
+        vobj.Proxy = self
+
+    def getIcon(self):
+        return ":/icons/Part_Feature.svg"
+
+    def attach(self, vobj):
+        self.ViewObject = vobj
+
+    def updateData(self, fp, prop):
+        pass
+
 
 def ensure_shadow_object():
-    doc = FreeCAD.ActiveDocument 
-    if not doc: return None
+    doc = FreeCAD.ActiveDocument
+    if not doc:
+        return None
+
     obj = doc.getObject("Build123d_Shadow")
     if not obj:
         obj = doc.addObject("Part::FeaturePython", "Build123d_Shadow")
@@ -71,4 +187,5 @@ def ensure_shadow_object():
         Build123dViewProvider(obj.ViewObject)
         obj.ViewObject.ShapeColor = (0.0, 1.0, 0.0)
         obj.ViewObject.Transparency = 60
+
     return obj
