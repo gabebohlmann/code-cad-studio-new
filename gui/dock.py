@@ -140,11 +140,9 @@ class B123dLiveSyncObserver:
         self.panel.trigger_gui_to_code_update()
 
     def slotDeletedObject(self, obj):
-        """IMPORTANT: deletion events do not always produce slotChangedObject."""
         try:
             if self.panel.programmatic_update:
                 return
-            # On any deletion, re-scan tip; if none, panel will clear.
             self.panel.trigger_gui_to_code_update()
         except Exception:
             pass
@@ -306,7 +304,7 @@ class B123dDockWidget(QtGui.QDockWidget):
         super().closeEvent(e)
 
     # -------------------------------------------------------------------------
-    # NEW: Clear panel + empty shadow when no part exists
+    # Clear panel + make shadow blank (guaranteed by deleting shadow object)
     # -------------------------------------------------------------------------
     def clear_panel_no_part(self):
         """Called when there are no non-shadow Part:: objects in the document."""
@@ -336,21 +334,30 @@ class B123dDockWidget(QtGui.QDockWidget):
             self.verify_bar.setText("NO PART")
             self.verify_bar.setStyleSheet("background: #ccc; color: #555; padding: 8px;")
 
-            # Empty the shadow display
-            shadow = ensure_shadow_object()
-            if shadow:
+            # GUARANTEE: remove shadow object so nothing remains visible
+            doc = FreeCAD.ActiveDocument
+            if doc:
+                shadow = doc.getObject("Build123d_Shadow")
+                if shadow:
+                    try:
+                        doc.removeObject(shadow.Name)
+                    except Exception:
+                        # Fallback: hide & try to clear shape
+                        try:
+                            shadow.ViewObject.Visibility = False
+                        except Exception:
+                            pass
+                        try:
+                            shadow.Shape = PartModule.Shape()
+                            shadow.touch()
+                        except Exception:
+                            pass
+
                 try:
-                    shadow.Shape = PartModule.Shape()  # empty shape
-                    shadow.touch()
+                    doc.recompute()
                 except Exception:
                     pass
 
-            # Recompute once (safe, quick). If document is busy, ignore.
-            try:
-                if FreeCAD.ActiveDocument:
-                    FreeCAD.ActiveDocument.recompute()
-            except Exception:
-                pass
         finally:
             self.programmatic_update = False
 
@@ -417,7 +424,7 @@ class B123dDockWidget(QtGui.QDockWidget):
     def trigger_gui_to_code_update(self):
         self.status.setText("Reading FreeCAD…")
         self.status.setStyleSheet("background: #ddf; color: blue; padding: 5px;")
-        self.timer_gui_to_code.start(300)  # quicker feels nicer for delete/create
+        self.timer_gui_to_code.start(300)
 
     def find_tip_object(self):
         doc = FreeCAD.ActiveDocument
@@ -509,11 +516,16 @@ class B123dDockWidget(QtGui.QDockWidget):
             return
 
         tip = self.find_tip_object()
-        shadow = ensure_shadow_object()
+        shadow = FreeCAD.ActiveDocument.getObject("Build123d_Shadow") if FreeCAD.ActiveDocument else None
 
-        # If no tip exists anymore, keep UI consistent.
         if not tip:
             self.verify_bar.setText("NO PART")
+            self.verify_bar.setStyleSheet("background: #ccc; color: #555; padding: 8px;")
+            return
+
+        # If shadow was deleted by clear_panel_no_part, don't error — just recreate on next apply.
+        if not shadow:
+            self.verify_bar.setText("NO SHADOW")
             self.verify_bar.setStyleSheet("background: #ccc; color: #555; padding: 8px;")
             return
 
@@ -542,7 +554,6 @@ class B123dDockWidget(QtGui.QDockWidget):
         current_names = set(v["name"] for v in current_vars)
         vals = [v["value"] for v in current_vars]
         if not vals:
-            # If editor empty, ensure we clear old sliders
             for name in list(self.param_widgets.keys()):
                 try:
                     self.param_widgets[name].deleteLater()
@@ -622,7 +633,6 @@ class B123dDockWidget(QtGui.QDockWidget):
             self.btn_insert_selector.setEnabled(False)
 
     def update_selector_from_current_selection(self):
-        # If no part exists, show that rather than "unsupported"
         if not self.find_tip_object():
             self.set_selector_text(None, hint="No part in document. Create a Part:: object…")
             return
