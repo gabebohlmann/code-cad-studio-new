@@ -1,3 +1,5 @@
+# core/transpiler.py
+
 import FreeCAD
 
 def fingerprint(edge):
@@ -175,6 +177,13 @@ def get_geometry_from_links(obj, parent):
     return geoms
 
 
+def _approx(a, b, tol=1e-7):
+    try:
+        return abs(float(a) - float(b)) <= tol
+    except Exception:
+        return False
+
+
 def transpile_object(obj):
     header = f"# {obj.Name}\n"
 
@@ -186,25 +195,31 @@ def transpile_object(obj):
         r, h = obj.Radius.Value, obj.Height.Value
         return f"{header}part = Cylinder(radius={r}, height={h}, align=(Align.CENTER, Align.CENTER, Align.MIN))"
 
-    # -----------------------------
-    # NEW: Part::Sphere -> Sphere()
-    # -----------------------------
     elif obj.TypeId == "Part::Sphere":
+        # FreeCAD Part::Sphere supports partial spheres via Angle1/Angle2/Angle3.
+        # A "full sphere" is typically Angle1=-90, Angle2=90, Angle3=360.
         r = obj.Radius.Value
 
-        # FreeCAD Part::Sphere usually has Angle1/Angle2/Angle3
-        # Angle1: bottom hemisphere limit (default -90)
-        # Angle2: top hemisphere limit (default 90)
-        # Angle3: revolution (default 360)
-        a1 = obj.Angle1.Value if hasattr(obj, "Angle1") else -90.0
-        a2 = obj.Angle2.Value if hasattr(obj, "Angle2") else 90.0
-        a3 = obj.Angle3.Value if hasattr(obj, "Angle3") else 360.0
+        # Be defensive about property names:
+        a1 = getattr(getattr(obj, "Angle1", None), "Value", None)
+        a2 = getattr(getattr(obj, "Angle2", None), "Value", None)
+        a3 = getattr(getattr(obj, "Angle3", None), "Value", None)
 
-        return (
-            f"{header}part = Sphere("
-            f"radius={r}, arc_size1={a1}, arc_size2={a2}, arc_size3={a3}, "
-            f"align=(Align.CENTER, Align.CENTER, Align.CENTER))"
-        )
+        # If angles are missing for some reason, assume full sphere
+        if a1 is None or a2 is None or a3 is None:
+            return f"{header}part = Sphere(radius={r}, align=(Align.CENTER, Align.CENTER, Align.CENTER))"
+
+        # Omit arc params when this is the default full sphere
+        is_full = _approx(a1, -90.0) and _approx(a2, 90.0) and _approx(a3, 360.0)
+
+        if is_full:
+            return f"{header}part = Sphere(radius={r}, align=(Align.CENTER, Align.CENTER, Align.CENTER))"
+        else:
+            return (
+                f"{header}part = Sphere("
+                f"radius={r}, arc_size1={a1}, arc_size2={a2}, arc_size3={a3}, "
+                f"align=(Align.CENTER, Align.CENTER, Align.CENTER))"
+            )
 
     elif obj.TypeId in ["Part::Fillet", "Part::Chamfer"]:
         parent = None
