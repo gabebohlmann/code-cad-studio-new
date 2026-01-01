@@ -230,30 +230,38 @@ class B123dDockWidget(QtGui.QDockWidget):
                 self.pl.addWidget(w); self.param_widgets[name] = w
 
     def update_variable_from_slider(self, name, val):
-        code = self.editor.toPlainText()
-        lines = code.split('\n')
-        pattern = re.compile(rf"^({name})\s*=\s*([-+]?[0-9]*\.?[0-9]+)(.*)$")
-        new_lines = []
-        for line in lines:
-            match = pattern.match(line.strip())
-            if match: new_lines.append(f"{name} = {val:.2f}{match.group(3)}")
-            else: new_lines.append(line)
-        new_code = '\n'.join(new_lines)
-        
-        self.programmatic_update = True 
-        self.editor.blockSignals(True)
-        self.editor.setPlainText(new_code)
-        self.editor.blockSignals(False)
-        
         try:
+            code = self.editor.toPlainText()
+            lines = code.split('\n')
+            pattern = re.compile(rf"^({name})\s*=\s*([-+]?[0-9]*\.?[0-9]+)(.*)$")
+
+            new_lines = []
+            for line in lines:
+                match = pattern.match(line.strip())
+                if match:
+                    new_lines.append(f"{name} = {val:.2f}{match.group(3)}")
+                else:
+                    new_lines.append(line)
+
+            new_code = '\n'.join(new_lines)
+
+            self.programmatic_update = True
+            self.editor.blockSignals(True)
+            self.editor.setPlainText(new_code)
+            self.editor.blockSignals(False)
+
             inject_code_to_freecad(new_code)
             shadow = ensure_shadow_object()
-            if shadow: 
-                shadow.Code = new_code; shadow.touch()
+            if shadow:
+                shadow.Code = new_code
+                shadow.touch()
                 QtCore.QTimer.singleShot(50, self.deferred_verification)
-        finally: 
-            self.programmatic_update = False
 
+        except Exception as e:
+            FreeCAD.Console.PrintError(f"[CodeCADStudio] Slider update failed: {e}\n")
+        finally:
+            self.programmatic_update = False
+        
 # -----------------------------------------------------------------------------
 # WORKBENCH LAUNCHER
 # -----------------------------------------------------------------------------
