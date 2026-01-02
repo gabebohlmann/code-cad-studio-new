@@ -1,5 +1,3 @@
-# gui/dock.py
-
 from PySide import QtGui, QtCore
 import FreeCAD
 import FreeCADGui
@@ -228,6 +226,17 @@ class B123dDockWidget(QtGui.QDockWidget):
         row.addWidget(self.btn_clear_selection)
         tools_l.addLayout(row)
 
+        # NEW: Build123d origin cleanup button
+        row2 = QtGui.QHBoxLayout()
+        self.btn_use_b123d_origin = QtGui.QPushButton("Use build123d origin")
+        self.btn_use_b123d_origin.setToolTip(
+            "Remove trailing Pos(...) placement from code and move the FreeCAD base object to match.\n"
+            "This keeps the validator matching while simplifying the generated build123d code."
+        )
+        self.btn_use_b123d_origin.clicked.connect(self.use_build123d_origin_clicked)
+        row2.addWidget(self.btn_use_b123d_origin)
+        tools_l.addLayout(row2)
+
         l1.addWidget(tools)
 
         self.status = QtGui.QLabel("Ready")
@@ -310,12 +319,14 @@ class B123dDockWidget(QtGui.QDockWidget):
         """Called when there are no non-shadow Part:: objects in the document."""
         self.programmatic_update = True
         try:
+            # Clear editor
             self.editor.blockSignals(True)
             try:
                 self.editor.setPlainText("")
             finally:
                 self.editor.blockSignals(False)
 
+            # Clear tuner widgets
             for name in list(self.param_widgets.keys()):
                 try:
                     self.param_widgets[name].deleteLater()
@@ -323,13 +334,16 @@ class B123dDockWidget(QtGui.QDockWidget):
                     pass
                 del self.param_widgets[name]
 
+            # Reset selector UI
             self.set_selector_text(None, hint="No part in document. Create a Part:: object…")
 
+            # Reset status + verify bar
             self.status.setText("No Part")
             self.status.setStyleSheet("background: #eee; color: #555; padding: 5px;")
             self.verify_bar.setText("NO PART")
             self.verify_bar.setStyleSheet("background: #ccc; color: #555; padding: 8px;")
 
+            # GUARANTEE: remove shadow object so nothing remains visible
             doc = FreeCAD.ActiveDocument
             if doc:
                 shadow = doc.getObject("Build123d_Shadow")
@@ -337,6 +351,7 @@ class B123dDockWidget(QtGui.QDockWidget):
                     try:
                         doc.removeObject(shadow.Name)
                     except Exception:
+                        # Fallback: hide & try to clear shape
                         try:
                             shadow.ViewObject.Visibility = False
                         except Exception:
@@ -450,6 +465,30 @@ class B123dDockWidget(QtGui.QDockWidget):
         leaves = [c for c in candidates if c not in parents]
         return leaves[-1] if leaves else None
 
+    def _find_root_base_object(self, obj):
+        """Walk .Base links down to the primitive/root object so we can move the whole tree."""
+        seen = set()
+        cur = obj
+        while cur and hasattr(cur, "Base"):
+            base = cur.Base
+            if isinstance(base, tuple) and base:
+                base = base[0]
+            elif isinstance(base, list):
+                base_obj = None
+                for b in base:
+                    if hasattr(b, "Name"):
+                        base_obj = b
+                        break
+                base = base_obj
+
+            if not base or not hasattr(base, "Name"):
+                break
+            if base in seen:
+                break
+            seen.add(base)
+            cur = base
+        return cur
+
     def perform_gui_to_code(self):
         tip = self.find_tip_object()
         if not tip:
@@ -459,6 +498,7 @@ class B123dDockWidget(QtGui.QDockWidget):
         try:
             code = "from build123d import *\n\n" + transpile_object(tip)
 
+            # GUI->Code should NOT inject back into FreeCAD
             self.apply_code(
                 code,
                 reason="Synced (GUI → Code)",
@@ -516,6 +556,7 @@ class B123dDockWidget(QtGui.QDockWidget):
             self.verify_bar.setStyleSheet("background: #ccc; color: #555; padding: 8px;")
             return
 
+        # If shadow was deleted by clear_panel_no_part, don't error — just recreate on next apply.
         if not shadow:
             self.verify_bar.setText("NO SHADOW")
             self.verify_bar.setStyleSheet("background: #ccc; color: #555; padding: 8px;")
@@ -673,6 +714,114 @@ class B123dDockWidget(QtGui.QDockWidget):
             verify_delay_ms=80,
         )
         self.refresh_tuner_ui()
+
+    # -------------------------------------------------------------------------
+    # Use build123d origin: strip Pos() from code AND move FreeCAD base object
+    # -------------------------------------------------------------------------
+    def _strip_default_sphere_align(self, code: str) -> str:
+        # Only remove the exact default align for Sphere
+        code = code.replace(", align=(Align.CENTER, Align.CENTER, Align.CENTER)", "")
+        code = code.replace("align=(Align.CENTER, Align.CENTER, Align.CENTER), ", "")
+        code = re.sub(r",\s*\)", ")", code)
+        return code
+
+    def _extract_and_remove_part_pos_transforms(self, code: str):
+        """
+        Remove lines of the form:
+            part = Pos(x, y, z) * part
+        Return (new_code, (dx,dy,dz), removed_any)
+        """
+        dx = dy = dz = 0.0
+        removed_any = False
+
+        pos_re = re.compile(
+            r"^\s*part\s*=\s*Pos\(\s*([-\d\.eE]+)\s*,\s*([-\d\.eE]+)\s*,\s*([-\d\.eE]+)\s*\)\s*\*\s*part\s*$"
+        )
+
+        new_lines = []
+        for line in code.splitlines():
+            m = pos_re.match(line.strip())
+            if m:
+                try:
+                    dx += float(m.group(1))
+                    dy += float(m.group(2))
+                    dz += float(m.group(3))
+                    removed_any = True
+                    continue
+                except Exception:
+                    # If parsing fails, keep the line
+                    pass
+            new_lines.append(line)
+
+        return "\n".join(new_lines), (dx, dy, dz), removed_any
+
+    def use_build123d_origin_clicked(self):
+        """
+        Goal:
+          - Keep FreeCAD and shadow matching in location
+          - But simplify code by removing Pos(...) and default Sphere align
+
+        Implementation:
+          - Remove `part = Pos(...) * part` lines from code (accumulate translation)
+          - Apply inverse translation to the *root* FreeCAD base object Placement
+          - Update editor + shadow with cleaned code
+        """
+        tip = self.find_tip_object()
+        if not tip:
+            self.status.setText("No Part")
+            self.status.setStyleSheet("background: #eee; color: #555; padding: 5px;")
+            return
+
+        code = self.editor.toPlainText()
+        if not code.strip():
+            return
+
+        # 1) remove trailing part = Pos(...) * part
+        cleaned, (dx, dy, dz), removed_any = self._extract_and_remove_part_pos_transforms(code)
+
+        # 2) strip redundant default Sphere align
+        cleaned = self._strip_default_sphere_align(cleaned)
+
+        # If nothing to do, still apply align cleanup (if any)
+        if not removed_any and cleaned == code:
+            self.status.setText("Already using build123d origin")
+            self.status.setStyleSheet("background: #dfd; color: green; padding: 5px;")
+            return
+
+        # 3) Move the root/base FreeCAD object by inverse translation
+        root = self._find_root_base_object(tip)
+        self.programmatic_update = True
+        try:
+            if removed_any and root and hasattr(root, "Placement"):
+                try:
+                    inv = FreeCAD.Base.Vector(-dx, -dy, -dz)
+                    pl = root.Placement
+                    pl.Base = pl.Base.add(inv)
+                    root.Placement = pl
+                except Exception:
+                    pass
+
+            try:
+                if FreeCAD.ActiveDocument:
+                    FreeCAD.ActiveDocument.recompute()
+            except Exception:
+                pass
+
+            # 4) Apply cleaned code to editor + shadow (do NOT re-inject to FreeCAD here)
+            self.apply_code(
+                cleaned,
+                reason="Using build123d origin (cleaned code)",
+                update_editor=True,
+                update_freecad=False,
+                update_shadow=True,
+                schedule_verify=True,
+                verify_delay_ms=120,
+            )
+
+            self.refresh_tuner_ui()
+
+        finally:
+            self.programmatic_update = False
 
 
 # -----------------------------------------------------------------------------
