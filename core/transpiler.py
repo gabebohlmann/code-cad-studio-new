@@ -180,8 +180,6 @@ def _use_b123d_origin(obj) -> bool:
 def _bbox_center_local(obj):
     """
     Return bounding-box center in *local* object coordinates (object space).
-    This is the key piece to reconcile FreeCAD primitives (often "base at origin")
-    with build123d primitives (often "bbox centered at origin").
     """
     try:
         shp = getattr(obj, "Shape", None)
@@ -192,11 +190,9 @@ def _bbox_center_local(obj):
             return None
         c_world = bb.Center
 
-        # Convert world bbox center into local coordinates
         inv = obj.Placement.inverse()
         return inv.multVec(c_world)
     except Exception:
-        # Fallback: assume translation-only placement
         try:
             base = obj.Placement.Base
             return FreeCAD.Base.Vector(c_world.x - base.x, c_world.y - base.y, c_world.z - base.z)
@@ -217,10 +213,8 @@ def transpile_object(obj):
         l, w, h = obj.Length.Value, obj.Width.Value, obj.Height.Value
 
         if _use_b123d_origin(obj):
-            # build123d default (bbox centered)
             return f"{header}part = Box({l}, {w}, {h})"
 
-        # FreeCAD default (corner at origin, +XYZ)
         return f"{header}part = Box({l}, {w}, {h}, align=(Align.MIN, Align.MIN, Align.MIN))"
 
     # -------------------------
@@ -230,20 +224,17 @@ def transpile_object(obj):
         r, h = obj.Radius.Value, obj.Height.Value
 
         if _use_b123d_origin(obj):
-            # build123d default (bbox centered)
             return f"{header}part = Cylinder(radius={r}, height={h})"
 
-        # FreeCAD default (base at z=0, axis +Z)
         return f"{header}part = Cylinder(radius={r}, height={h}, align=(Align.CENTER, Align.CENTER, Align.MIN))"
 
     # -------------------------
     # Cone
     # -------------------------
     elif obj.TypeId == "Part::Cone":
-        # FreeCAD cone exposes Radius1 (bottom), Radius2 (top), Height, Angle :contentReference[oaicite:1]{index=1}
-        r1 = float(getattr(obj, "Radius1", 0.0))
-        r2 = float(getattr(obj, "Radius2", 0.0))
-        h = float(getattr(obj, "Height", 0.0))
+        r1 = float(getattr(obj, "Radius1", 5.0))
+        r2 = float(getattr(obj, "Radius2", 2.0))
+        h = float(getattr(obj, "Height", 10.0))
         ang = float(getattr(obj, "Angle", 360.0))
 
         def _is_default(v, d):
@@ -254,26 +245,20 @@ def transpile_object(obj):
 
         is_full = _is_default(ang, 360.0)
 
-        # build123d signature: Cone(bottom_radius, top_radius, height, arc_size=360, align=(CENTER,CENTER,CENTER))
-        # FreeCAD primitive behavior matches "base on Z=0" like cylinder => align z MIN when matching FreeCAD origin.
-        args = [f"bottom_radius={r1}", f"top_radius={r2}", f"height={h}"]
-        if not is_full:
-            args.append(f"arc_size={ang}")
-
         if _use_b123d_origin(obj):
-            # build123d origin: keep code clean, no align
-            return f"{header}part = Cone({', '.join(args)})"
+            if is_full:
+                return f"{header}part = Cone(bottom_radius={r1}, top_radius={r2}, height={h})"
+            return f"{header}part = Cone(bottom_radius={r1}, top_radius={r2}, height={h}, arc_size={ang})"
 
-        # FreeCAD origin: base at z=0
-        return f"{header}part = Cone({', '.join(args)}, align=(Align.CENTER, Align.CENTER, Align.MIN))"
+        if is_full:
+            return f"{header}part = Cone(bottom_radius={r1}, top_radius={r2}, height={h}, align=(Align.CENTER, Align.CENTER, Align.MIN))"
+        return f"{header}part = Cone(bottom_radius={r1}, top_radius={r2}, height={h}, arc_size={ang}, align=(Align.CENTER, Align.CENTER, Align.MIN))"
 
     # -------------------------
     # Sphere
     # -------------------------
     elif obj.TypeId == "Part::Sphere":
         r = obj.Radius.Value
-
-        # FreeCAD Part Sphere uses Angle1/Angle2/Angle3 for partial spheres
         a1 = float(getattr(obj, "Angle1", -90.0))
         a2 = float(getattr(obj, "Angle2", 90.0))
         a3 = float(getattr(obj, "Angle3", 360.0))
@@ -286,31 +271,61 @@ def transpile_object(obj):
 
         is_full = _is_default(a1, -90.0) and _is_default(a2, 90.0) and _is_default(a3, 360.0)
 
-        # If full sphere, FreeCAD and build123d share the same natural origin (center),
-        # so keep it minimal in both modes.
         if is_full:
             return f"{header}part = Sphere(radius={r})"
 
-        # Partial sphere:
-        # build123d Sphere(...) is effectively bbox-centered (align CENTER default),
-        # but FreeCAD Part::Sphere is sphere-center anchored.
-        #
-        # When NOT using build123d origin, we emit a Pos(...) that shifts bbox-centered
-        # build123d geometry into FreeCAD's sphere-center anchored placement.
-        #
-        # When using build123d origin, we omit the Pos(...) and instead rely on the
-        # FreeCAD object placement being shifted by the UI tool.
         lines = []
-        lines.append(
-            f"{header}part = Sphere(radius={r}, arc_size1={a1}, arc_size2={a2}, arc_size3={a3})"
-        )
+        lines.append(f"{header}part = Sphere(radius={r}, arc_size1={a1}, arc_size2={a2}, arc_size3={a3})")
 
         if not _use_b123d_origin(obj):
             c_local = _bbox_center_local(obj)
             if c_local is not None:
                 cx, cy, cz = float(c_local.x), float(c_local.y), float(c_local.z)
                 if abs(cx) > 1e-9 or abs(cy) > 1e-9 or abs(cz) > 1e-9:
-                    # IMPORTANT: shift by +bbox_center_local
+                    lines.append(f"part = Pos({cx:.6f}, {cy:.6f}, {cz:.6f}) * part")
+
+        return "\n".join(lines)
+
+    # -------------------------
+    # Torus  ✅ NEW
+    # -------------------------
+    elif obj.TypeId == "Part::Torus":
+        R1 = float(getattr(obj, "Radius1", 10.0))  # major
+        R2 = float(getattr(obj, "Radius2", 2.0))   # minor
+
+        a1 = float(getattr(obj, "Angle1", 0.0))     # minor start
+        a2 = float(getattr(obj, "Angle2", 360.0))   # minor end
+        a3 = float(getattr(obj, "Angle3", 360.0))   # major revolve
+
+        def _is_default(v, d):
+            try:
+                return abs(float(v) - float(d)) < 1e-9
+            except Exception:
+                return False
+
+        is_full = _is_default(a1, 0.0) and _is_default(a2, 360.0) and _is_default(a3, 360.0)
+
+        if is_full:
+            return f"{header}part = Torus(major_radius={R1}, minor_radius={R2})"
+
+        # Emit only non-default angle params
+        args = [f"major_radius={R1}", f"minor_radius={R2}"]
+        if not _is_default(a1, 0.0):
+            args.append(f"minor_start_angle={a1}")
+        if not _is_default(a2, 360.0):
+            args.append(f"minor_end_angle={a2}")
+        if not _is_default(a3, 360.0):
+            args.append(f"major_angle={a3}")
+
+        lines = [f"{header}part = Torus({', '.join(args)})"]
+
+        # Same idea as partial sphere: FreeCAD is "parametric-center anchored",
+        # build123d is effectively bbox-centered, so shift unless user opted into b123d origin.
+        if not _use_b123d_origin(obj):
+            c_local = _bbox_center_local(obj)
+            if c_local is not None:
+                cx, cy, cz = float(c_local.x), float(c_local.y), float(c_local.z)
+                if abs(cx) > 1e-9 or abs(cy) > 1e-9 or abs(cz) > 1e-9:
                     lines.append(f"part = Pos({cx:.6f}, {cy:.6f}, {cz:.6f}) * part")
 
         return "\n".join(lines)
