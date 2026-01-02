@@ -165,6 +165,7 @@ class Build123dShadow:
                     new_shape.read(temp_path)
 
                     # Display offset (defaults to +X 60mm); safe even in headless
+                    # TODO: investigate translation necessity
                     try:
                         off = getattr(obj, "DisplayOffset", FreeCAD.Base.Vector(60, 0, 0))
                         if off and (abs(off.x) > 1e-12 or abs(off.y) > 1e-12 or abs(off.z) > 1e-12):

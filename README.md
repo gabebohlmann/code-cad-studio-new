@@ -15,6 +15,10 @@ A FreeCAD workbench for bidirectional sync between FreeCAD and a Build123d code 
   1. Fix FC object losing b123d origin when making cone starting from b123d code panel and then increasing h from slider
   1. Add a better dialog to indicate sync direction GUI to code shows but not code to GUI
   1. Change parser back to AST and do the architecture improvements described by chatGPT in parser.py in commit #691011a96f682b50c07a24abcf031ca04d008c2f
+  1. Investigate translation necessity in shadow.py
+                    try:
+                        off = getattr(obj, "DisplayOffset", FreeCAD.Base.Vector(60, 0, 0))
+  1. 
 
 ## Build123d algebra mode vs. FreeCAD Part Workbench feature parity
   * b123d object class works with algebra and builder mode so some objects that are based on sketch geometry (Part Design WB) in FC don't work with in FC Part WB such as Hole, CounterSinkHole, CounterBoleHole. Wedge is a bulit in object in b123d that would need to built by an extruded custom polygon in FC I believe
