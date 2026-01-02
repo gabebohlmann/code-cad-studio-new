@@ -7,3 +7,4 @@ A FreeCAD workbench for bidirectional sync between FreeCAD and a Build123d code 
 1. Decide what to do with sliders when a var is an order of magnitude larger (currently they all reset too the middle point and have individual scales)
 1. Update sliders to reset scale when max value is lowered
 1. Add table functionality to slider tab
+1. Make shadow.py a fully headless cli compatible mesh generator
