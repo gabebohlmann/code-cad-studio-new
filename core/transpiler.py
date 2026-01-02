@@ -1,14 +1,11 @@
-# core/transpiler.py
-
 import FreeCAD
-import math
 
 
 def fingerprint(edge):
     try:
         mid = edge.valueAt(edge.Length / 2.0)
         return (round(edge.Length, 4), round(mid.x, 3), round(mid.y, 3), round(mid.z, 3))
-    except:
+    except Exception:
         return None
 
 
@@ -21,26 +18,26 @@ def _safe_center(geo_shape):
     if hasattr(geo_shape, "Point"):
         try:
             return geo_shape.Point
-        except:
+        except Exception:
             pass
 
     if hasattr(geo_shape, "CenterOfMass"):
         try:
             return geo_shape.CenterOfMass
-        except:
+        except Exception:
             pass
 
     if hasattr(geo_shape, "Vertexes"):
         try:
             if geo_shape.Vertexes and hasattr(geo_shape.Vertexes[0], "Point"):
                 return geo_shape.Vertexes[0].Point
-        except:
+        except Exception:
             pass
 
     if hasattr(geo_shape, "BoundBox"):
         try:
             return geo_shape.BoundBox.Center
-        except:
+        except Exception:
             pass
 
     return None
@@ -80,13 +77,13 @@ def solve_selector(geo_shape):
                     return f"part.faces().sort_by(Axis.X).{'last' if c.x > 0 else 'first'}"
                 if abs(n.y) > 0.99:
                     return f"part.faces().sort_by(Axis.Y).{'last' if c.y > 0 else 'first'}"
-            except:
+            except Exception:
                 pass
             return f"part.faces().sort_by_distance(({cx}, {cy}, {cz})).first"
 
         return None
 
-    except:
+    except Exception:
         return None
 
 
@@ -125,7 +122,7 @@ def generate_smart_selector_code(selected_geoms, parent_obj):
             try:
                 if abs(e.tangentAt(e.Length / 2.0).dot(axis)) > 0.99:
                     a_prints.add(fingerprint(e))
-            except:
+            except Exception:
                 pass
         if a_prints:
             candidates.append((a_prints, f"part.edges().filter_by({axis_name})"))
@@ -169,94 +166,77 @@ def get_geometry_from_links(obj, parent):
 
 
 # -----------------------------------------------------------------------------
-# Sphere offset correction
+# Origin helpers
 # -----------------------------------------------------------------------------
-def _clamp(x, lo, hi):
-    return max(lo, min(hi, x))
+def _use_b123d_origin(obj) -> bool:
+    try:
+        return bool(getattr(obj, "CodeCAD_UseB123dOrigin", False))
+    except Exception:
+        return False
 
 
-def _partial_sphere_bbox_center(radius, a1_deg, a2_deg, a3_deg):
+def _bbox_center_local(obj):
     """
-    Approximate bounding box center (in sphere-center coordinates) for a FreeCAD-like
-    clipped sphere:
-      - latitude range [a1, a2] where -90..90
-      - revolution about Z from 0 .. a3 (degrees)
-
-    This is intentionally consistent with "sphere centered at origin",
-    which is what FreeCAD does for Part::Sphere.
-
-    We use:
-      zmin = r*sin(a1), zmax = r*sin(a2)
-      xy radius max = r*cos(lat0) where lat0 is clamped 0 inside [a1,a2]
-      sector angles = [0, a3] (normalized)
-      bbox extremes in xy from sector endpoints plus quadrant angles inside.
+    Return bounding-box center in *local* object coordinates (object space).
+    This is the key piece to reconcile FreeCAD primitives (often "base at origin")
+    with build123d primitives (often "bbox centered at origin").
     """
-    r = float(radius)
+    try:
+        shp = getattr(obj, "Shape", None)
+        if not shp:
+            return None
+        bb = shp.BoundBox
+        if not bb:
+            return None
+        c_world = bb.Center
 
-    # Normalize latitude ordering
-    a1 = float(a1_deg)
-    a2 = float(a2_deg)
-    if a2 < a1:
-        a1, a2 = a2, a1
-
-    # Z bounds from latitude
-    zmin = r * math.sin(math.radians(a1))
-    zmax = r * math.sin(math.radians(a2))
-    cz = 0.5 * (zmin + zmax)
-
-    # Handle full revolution => symmetric in XY
-    theta = float(a3_deg)
-
-    # Normalize theta into [0, 360] while preserving "full" if >= 360
-    if abs(theta) >= 360.0:
-        return (0.0, 0.0, cz)
-
-    # Clamp lat0 to closest-to-equator latitude to maximize XY radius
-    lat0 = _clamp(0.0, a1, a2)
-    rho = r * math.cos(math.radians(lat0))
-
-    # If the band doesn't include any meaningful XY radius
-    if abs(rho) < 1e-12:
-        return (0.0, 0.0, cz)
-
-    # Consider sector angles from 0..theta (allow negative theta)
-    start = 0.0
-    end = theta
-    if end < start:
-        start, end = end, start
-
-    # Candidate angles (deg): endpoints + quadrant angles within [start,end]
-    candidates = [start, end]
-    for q in [0.0, 90.0, 180.0, 270.0, 360.0]:
-        if start - 1e-9 <= q <= end + 1e-9:
-            candidates.append(q)
-
-    xs = []
-    ys = []
-    for ang in candidates:
-        a = math.radians(ang)
-        xs.append(rho * math.cos(a))
-        ys.append(rho * math.sin(a))
-
-    xmin, xmax = min(xs), max(xs)
-    ymin, ymax = min(ys), max(ys)
-    cx = 0.5 * (xmin + xmax)
-    cy = 0.5 * (ymin + ymax)
-
-    return (cx, cy, cz)
+        # Convert world bbox center into local coordinates
+        inv = obj.Placement.inverse()
+        return inv.multVec(c_world)
+    except Exception:
+        # Fallback: assume translation-only placement
+        try:
+            base = obj.Placement.Base
+            return FreeCAD.Base.Vector(c_world.x - base.x, c_world.y - base.y, c_world.z - base.z)
+        except Exception:
+            return None
 
 
+# -----------------------------------------------------------------------------
+# Transpile
+# -----------------------------------------------------------------------------
 def transpile_object(obj):
     header = f"# {obj.Name}\n"
 
+    # -------------------------
+    # Box
+    # -------------------------
     if obj.TypeId == "Part::Box":
         l, w, h = obj.Length.Value, obj.Width.Value, obj.Height.Value
+
+        if _use_b123d_origin(obj):
+            # build123d default (bbox centered)
+            return f"{header}part = Box({l}, {w}, {h})"
+
+        # FreeCAD default (corner at origin, +XYZ)
         return f"{header}part = Box({l}, {w}, {h}, align=(Align.MIN, Align.MIN, Align.MIN))"
 
+    # -------------------------
+    # Cylinder
+    # -------------------------
     elif obj.TypeId == "Part::Cylinder":
         r, h = obj.Radius.Value, obj.Height.Value
+
+        if _use_b123d_origin(obj):
+            # build123d default (bbox centered)
+            return f"{header}part = Cylinder(radius={r}, height={h})"
+
+        # FreeCAD default (base at z=0, axis +Z)
         return f"{header}part = Cylinder(radius={r}, height={h}, align=(Align.CENTER, Align.CENTER, Align.MIN))"
 
+    # -------------------------
+    # Sphere
+    # -------------------------
     elif obj.TypeId == "Part::Sphere":
         r = obj.Radius.Value
 
@@ -273,25 +253,38 @@ def transpile_object(obj):
 
         is_full = _is_default(a1, -90.0) and _is_default(a2, 90.0) and _is_default(a3, 360.0)
 
+        # If full sphere, FreeCAD and build123d share the same natural origin (center),
+        # so keep it minimal in both modes.
         if is_full:
-            return f"{header}part = Sphere(radius={r}, align=(Align.CENTER, Align.CENTER, Align.CENTER))"
+            return f"{header}part = Sphere(radius={r})"
 
-        # Build the clipped sphere
+        # Partial sphere:
+        # build123d Sphere(...) is effectively bbox-centered (align CENTER default),
+        # but FreeCAD Part::Sphere is sphere-center anchored.
+        #
+        # When NOT using build123d origin, we emit a Pos(...) that shifts bbox-centered
+        # build123d geometry into FreeCAD's sphere-center anchored placement.
+        #
+        # When using build123d origin, we omit the Pos(...) and instead rely on the
+        # FreeCAD object placement being shifted by the UI tool.
         lines = []
         lines.append(
-            f"{header}part = Sphere(radius={r}, arc_size1={a1}, arc_size2={a2}, arc_size3={a3}, "
-            f"align=(Align.CENTER, Align.CENTER, Align.CENTER))"
+            f"{header}part = Sphere(radius={r}, arc_size1={a1}, arc_size2={a2}, arc_size3={a3})"
         )
 
-        # ✅ Correct build123d bbox-centering so the sphere center stays at origin like FreeCAD
-        cx, cy, cz = _partial_sphere_bbox_center(r, a1, a2, a3)
-
-        # Only emit if meaningful
-        if abs(cx) > 1e-9 or abs(cy) > 1e-9 or abs(cz) > 1e-9:
-            lines.append(f"part = Pos({cx:.6f}, {cy:.6f}, {cz:.6f}) * part")
+        if not _use_b123d_origin(obj):
+            c_local = _bbox_center_local(obj)
+            if c_local is not None:
+                cx, cy, cz = float(c_local.x), float(c_local.y), float(c_local.z)
+                if abs(cx) > 1e-9 or abs(cy) > 1e-9 or abs(cz) > 1e-9:
+                    # IMPORTANT: shift by +bbox_center_local (see rationale in conversation)
+                    lines.append(f"part = Pos({cx:.6f}, {cy:.6f}, {cz:.6f}) * part")
 
         return "\n".join(lines)
 
+    # -------------------------
+    # Fillet / Chamfer
+    # -------------------------
     elif obj.TypeId in ["Part::Fillet", "Part::Chamfer"]:
         parent = None
         if hasattr(obj, "Base"):
@@ -313,7 +306,7 @@ def transpile_object(obj):
         if hasattr(obj, "Edges") and obj.Edges:
             try:
                 val = obj.Edges[0][1]
-            except:
+            except Exception:
                 pass
         elif hasattr(obj, "Radius"):
             val = obj.Radius.Value

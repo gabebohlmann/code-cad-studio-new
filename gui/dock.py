@@ -19,6 +19,7 @@ def _round3(x):
     except Exception:
         return x
 
+
 def selector_for_vertex(vertex_shape):
     try:
         p = vertex_shape.Point
@@ -27,6 +28,7 @@ def selector_for_vertex(vertex_shape):
     except Exception:
         return None
 
+
 def selector_for_edge(edge_shape):
     try:
         c = edge_shape.CenterOfMass
@@ -34,6 +36,7 @@ def selector_for_edge(edge_shape):
         return f"part.edges().sort_by_distance(({x}, {y}, {z})).first"
     except Exception:
         return None
+
 
 def selector_for_face(face_shape):
     try:
@@ -53,6 +56,7 @@ def selector_for_face(face_shape):
         return f"part.faces().sort_by_distance(({cx}, {cy}, {cz})).first"
     except Exception:
         return None
+
 
 def selector_from_subshape(subshape):
     try:
@@ -226,16 +230,10 @@ class B123dDockWidget(QtGui.QDockWidget):
         row.addWidget(self.btn_clear_selection)
         tools_l.addLayout(row)
 
-        # NEW: Build123d origin cleanup button
-        row2 = QtGui.QHBoxLayout()
+        # Use build123d origin button
         self.btn_use_b123d_origin = QtGui.QPushButton("Use build123d origin")
-        self.btn_use_b123d_origin.setToolTip(
-            "Remove trailing Pos(...) placement from code and move the FreeCAD base object to match.\n"
-            "This keeps the validator matching while simplifying the generated build123d code."
-        )
-        self.btn_use_b123d_origin.clicked.connect(self.use_build123d_origin_clicked)
-        row2.addWidget(self.btn_use_b123d_origin)
-        tools_l.addLayout(row2)
+        self.btn_use_b123d_origin.clicked.connect(self.apply_build123d_origin_to_tip)
+        tools_l.addWidget(self.btn_use_b123d_origin)
 
         l1.addWidget(tools)
 
@@ -465,30 +463,6 @@ class B123dDockWidget(QtGui.QDockWidget):
         leaves = [c for c in candidates if c not in parents]
         return leaves[-1] if leaves else None
 
-    def _find_root_base_object(self, obj):
-        """Walk .Base links down to the primitive/root object so we can move the whole tree."""
-        seen = set()
-        cur = obj
-        while cur and hasattr(cur, "Base"):
-            base = cur.Base
-            if isinstance(base, tuple) and base:
-                base = base[0]
-            elif isinstance(base, list):
-                base_obj = None
-                for b in base:
-                    if hasattr(b, "Name"):
-                        base_obj = b
-                        break
-                base = base_obj
-
-            if not base or not hasattr(base, "Name"):
-                break
-            if base in seen:
-                break
-            seen.add(base)
-            cur = base
-        return cur
-
     def perform_gui_to_code(self):
         tip = self.find_tip_object()
         if not tip:
@@ -716,118 +690,139 @@ class B123dDockWidget(QtGui.QDockWidget):
         self.refresh_tuner_ui()
 
     # -------------------------------------------------------------------------
-    # Use build123d origin: strip Pos() from code AND move FreeCAD base object
+    # Build123d Origin Tooling (bbox-center based; fixes partial spheres)
     # -------------------------------------------------------------------------
-    def _strip_default_sphere_align(self, code: str) -> str:
-        # Only remove the exact default align for Sphere
-        code = code.replace(", align=(Align.CENTER, Align.CENTER, Align.CENTER)", "")
-        code = code.replace("align=(Align.CENTER, Align.CENTER, Align.CENTER), ", "")
-        code = re.sub(r",\s*\)", ")", code)
-        return code
+    def _ensure_origin_props(self, obj):
+        """Add per-object props if missing."""
+        if not hasattr(obj, "CodeCAD_UseB123dOrigin"):
+            obj.addProperty(
+                "App::PropertyBool",
+                "CodeCAD_UseB123dOrigin",
+                "CodeCAD",
+                "If true, prefer build123d default origin/alignment for generated code.",
+            )
+            obj.CodeCAD_UseB123dOrigin = False
 
-    def _extract_and_remove_part_pos_transforms(self, code: str):
+        if not hasattr(obj, "CodeCAD_OriginDelta"):
+            obj.addProperty(
+                "App::PropertyVector",
+                "CodeCAD_OriginDelta",
+                "CodeCAD",
+                "World-space delta applied to Placement when enabling build123d origin.",
+            )
+            obj.CodeCAD_OriginDelta = FreeCAD.Base.Vector(0, 0, 0)
+
+    def _shape_bbox_center_local(self, obj):
         """
-        Remove lines of the form:
-            part = Pos(x, y, z) * part
-        Return (new_code, (dx,dy,dz), removed_any)
+        Compute bbox center in *local* coordinates (object space), even if Placement has rotation.
         """
-        dx = dy = dz = 0.0
-        removed_any = False
+        shp = getattr(obj, "Shape", None)
+        if not shp:
+            return None
+        try:
+            bb = shp.BoundBox
+            if not bb:
+                return None
+            c_world = bb.Center
+        except Exception:
+            return None
 
-        pos_re = re.compile(
-            r"^\s*part\s*=\s*Pos\(\s*([-\d\.eE]+)\s*,\s*([-\d\.eE]+)\s*,\s*([-\d\.eE]+)\s*\)\s*\*\s*part\s*$"
-        )
+        try:
+            inv = obj.Placement.inverse()
+            c_local = inv.multVec(c_world)
+            return c_local
+        except Exception:
+            # Fallback to translation-only
+            try:
+                base = obj.Placement.Base
+                return FreeCAD.Base.Vector(c_world.x - base.x, c_world.y - base.y, c_world.z - base.z)
+            except Exception:
+                return None
 
-        new_lines = []
-        for line in code.splitlines():
-            m = pos_re.match(line.strip())
-            if m:
-                try:
-                    dx += float(m.group(1))
-                    dy += float(m.group(2))
-                    dz += float(m.group(3))
-                    removed_any = True
+    def _find_root_object_for_origin(self, tip):
+        """
+        For origin changes, prefer applying to the *base primitive* if tip is a modifier.
+        This avoids weirdness where moving a fillet object might not do what you expect.
+        """
+        obj = tip
+        seen = set()
+
+        while obj and hasattr(obj, "Name") and obj.Name not in seen:
+            seen.add(obj.Name)
+
+            if obj.TypeId in ["Part::Fillet", "Part::Chamfer"]:
+                base = getattr(obj, "Base", None)
+                if isinstance(base, tuple):
+                    base = base[0]
+                if base:
+                    obj = base
                     continue
-                except Exception:
-                    # If parsing fails, keep the line
-                    pass
-            new_lines.append(line)
 
-        return "\n".join(new_lines), (dx, dy, dz), removed_any
+            return obj
 
-    def use_build123d_origin_clicked(self):
+        return tip
+
+    def apply_build123d_origin_to_tip(self):
         """
-        Goal:
-          - Keep FreeCAD and shadow matching in location
-          - But simplify code by removing Pos(...) and default Sphere align
-
-        Implementation:
-          - Remove `part = Pos(...) * part` lines from code (accumulate translation)
-          - Apply inverse translation to the *root* FreeCAD base object Placement
-          - Update editor + shadow with cleaned code
+        Enable build123d origin on the current root object by shifting its Placement so that
+        bbox center (local) becomes (0,0,0). This is the key fix for partial spheres.
         """
         tip = self.find_tip_object()
         if not tip:
-            self.status.setText("No Part")
-            self.status.setStyleSheet("background: #eee; color: #555; padding: 5px;")
+            QtGui.QMessageBox.information(self, "Use build123d origin", "No Part:: object found.")
             return
 
-        code = self.editor.toPlainText()
-        if not code.strip():
+        root = self._find_root_object_for_origin(tip)
+        if not root:
+            QtGui.QMessageBox.information(self, "Use build123d origin", "No suitable object found.")
             return
 
-        # 1) remove trailing part = Pos(...) * part
-        cleaned, (dx, dy, dz), removed_any = self._extract_and_remove_part_pos_transforms(code)
+        self._ensure_origin_props(root)
 
-        # 2) strip redundant default Sphere align
-        cleaned = self._strip_default_sphere_align(cleaned)
-
-        # If nothing to do, still apply align cleanup (if any)
-        if not removed_any and cleaned == code:
-            self.status.setText("Already using build123d origin")
-            self.status.setStyleSheet("background: #dfd; color: green; padding: 5px;")
+        # If bbox center already ~0, treat as already using build123d origin
+        c_local = self._shape_bbox_center_local(root)
+        if c_local is None:
+            QtGui.QMessageBox.warning(self, "Use build123d origin", "Could not compute bounding box center.")
             return
 
-        # 3) Move the root/base FreeCAD object by inverse translation
-        root = self._find_root_base_object(tip)
+        already_centered = (
+            abs(float(c_local.x)) < 1e-6 and abs(float(c_local.y)) < 1e-6 and abs(float(c_local.z)) < 1e-6
+        )
+
+        if bool(root.CodeCAD_UseB123dOrigin) or already_centered:
+            QtGui.QMessageBox.information(self, "Use build123d origin", "Already using build123d origin.")
+            return
+
+        # Convert local vector to world direction via rotation
+        try:
+            rot = root.Placement.Rotation
+            delta_world = rot.multVec(c_local)
+        except Exception:
+            delta_world = c_local
+
+        # Apply: move object so bbox center becomes origin in local space
         self.programmatic_update = True
         try:
-            if removed_any and root and hasattr(root, "Placement"):
-                try:
-                    inv = FreeCAD.Base.Vector(-dx, -dy, -dz)
-                    pl = root.Placement
-                    pl.Base = pl.Base.add(inv)
-                    root.Placement = pl
-                except Exception:
-                    pass
+            root.Placement.Base = root.Placement.Base.sub(delta_world)
+            root.CodeCAD_OriginDelta = delta_world
+            root.CodeCAD_UseB123dOrigin = True
 
-            try:
-                if FreeCAD.ActiveDocument:
-                    FreeCAD.ActiveDocument.recompute()
-            except Exception:
-                pass
-
-            # 4) Apply cleaned code to editor + shadow (do NOT re-inject to FreeCAD here)
-            self.apply_code(
-                cleaned,
-                reason="Using build123d origin (cleaned code)",
-                update_editor=True,
-                update_freecad=False,
-                update_shadow=True,
-                schedule_verify=True,
-                verify_delay_ms=120,
-            )
-
-            self.refresh_tuner_ui()
+            doc = FreeCAD.ActiveDocument
+            if doc:
+                doc.recompute()
 
         finally:
             self.programmatic_update = False
+
+        # Force refresh (don’t rely on observers because programmatic_update may skip them)
+        self.perform_gui_to_code()
 
 
 # -----------------------------------------------------------------------------
 # WORKBENCH LAUNCHER
 # -----------------------------------------------------------------------------
 _panel_instance = None
+
 
 def create_panel():
     global _panel_instance
@@ -844,6 +839,7 @@ def create_panel():
     mw.addDockWidget(QtCore.Qt.RightDockWidgetArea, _panel_instance)
     _panel_instance.show()
     return _panel_instance
+
 
 def toggle_panel():
     global _panel_instance
