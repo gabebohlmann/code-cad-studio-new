@@ -18,7 +18,7 @@ A FreeCAD workbench for bidirectional sync between FreeCAD and a Build123d code 
   1. Investigate translation necessity in shadow.py
                     try:
                         off = getattr(obj, "DisplayOffset", FreeCAD.Base.Vector(60, 0, 0))
-  1. 
+  1. Add a shadow offset button
 
 ## Build123d algebra mode vs. FreeCAD Part Workbench feature parity
   * b123d object class works with algebra and builder mode so some objects that are based on sketch geometry (Part Design WB) in FC don't work with in FC Part WB such as Hole, CounterSinkHole, CounterBoleHole. Wedge is a bulit in object in b123d that would need to built by an extruded custom polygon in FC I believe
