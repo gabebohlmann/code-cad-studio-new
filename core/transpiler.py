@@ -1,3 +1,5 @@
+# core/transpiler.py
+
 import FreeCAD
 
 
@@ -235,6 +237,37 @@ def transpile_object(obj):
         return f"{header}part = Cylinder(radius={r}, height={h}, align=(Align.CENTER, Align.CENTER, Align.MIN))"
 
     # -------------------------
+    # Cone
+    # -------------------------
+    elif obj.TypeId == "Part::Cone":
+        # FreeCAD cone exposes Radius1 (bottom), Radius2 (top), Height, Angle :contentReference[oaicite:1]{index=1}
+        r1 = float(getattr(obj, "Radius1", 0.0))
+        r2 = float(getattr(obj, "Radius2", 0.0))
+        h = float(getattr(obj, "Height", 0.0))
+        ang = float(getattr(obj, "Angle", 360.0))
+
+        def _is_default(v, d):
+            try:
+                return abs(float(v) - float(d)) < 1e-9
+            except Exception:
+                return False
+
+        is_full = _is_default(ang, 360.0)
+
+        # build123d signature: Cone(bottom_radius, top_radius, height, arc_size=360, align=(CENTER,CENTER,CENTER))
+        # FreeCAD primitive behavior matches "base on Z=0" like cylinder => align z MIN when matching FreeCAD origin.
+        args = [f"bottom_radius={r1}", f"top_radius={r2}", f"height={h}"]
+        if not is_full:
+            args.append(f"arc_size={ang}")
+
+        if _use_b123d_origin(obj):
+            # build123d origin: keep code clean, no align
+            return f"{header}part = Cone({', '.join(args)})"
+
+        # FreeCAD origin: base at z=0
+        return f"{header}part = Cone({', '.join(args)}, align=(Align.CENTER, Align.CENTER, Align.MIN))"
+
+    # -------------------------
     # Sphere
     # -------------------------
     elif obj.TypeId == "Part::Sphere":
@@ -277,7 +310,7 @@ def transpile_object(obj):
             if c_local is not None:
                 cx, cy, cz = float(c_local.x), float(c_local.y), float(c_local.z)
                 if abs(cx) > 1e-9 or abs(cy) > 1e-9 or abs(cz) > 1e-9:
-                    # IMPORTANT: shift by +bbox_center_local (see rationale in conversation)
+                    # IMPORTANT: shift by +bbox_center_local
                     lines.append(f"part = Pos({cx:.6f}, {cy:.6f}, {cz:.6f}) * part")
 
         return "\n".join(lines)
