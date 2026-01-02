@@ -1,7 +1,17 @@
+# core/shadow.py
+
 import FreeCAD
 import FreeCAD.Part as PartModule
 import tempfile
 import os
+
+
+def _gui_up() -> bool:
+    """True when FreeCAD is running with GUI (FreeCADGui loaded)."""
+    try:
+        return bool(getattr(FreeCAD, "GuiUp", False))
+    except Exception:
+        return False
 
 
 def _get_location_obj(bobj):
@@ -115,6 +125,17 @@ class Build123dShadow:
     def __init__(self, obj):
         if not hasattr(obj, "Code"):
             obj.addProperty("App::PropertyString", "Code", "Build123d", "Generated Code")
+
+        # Optional display offset (keeps old side-by-side behavior)
+        if not hasattr(obj, "DisplayOffset"):
+            obj.addProperty(
+                "App::PropertyVector",
+                "DisplayOffset",
+                "Build123d",
+                "World-space display offset applied to the shadow shape (for side-by-side viewing).",
+            )
+            obj.DisplayOffset = FreeCAD.Base.Vector(60, 0, 0)
+
         obj.Proxy = self
 
     def execute(self, obj):
@@ -143,8 +164,13 @@ class Build123dShadow:
                     new_shape = PartModule.Shape()
                     new_shape.read(temp_path)
 
-                    # keep your display offset to the side
-                    new_shape.translate(FreeCAD.Base.Vector(60, 0, 0))
+                    # Display offset (defaults to +X 60mm); safe even in headless
+                    try:
+                        off = getattr(obj, "DisplayOffset", FreeCAD.Base.Vector(60, 0, 0))
+                        if off and (abs(off.x) > 1e-12 or abs(off.y) > 1e-12 or abs(off.z) > 1e-12):
+                            new_shape.translate(off)
+                    except Exception:
+                        pass
 
                     obj.Shape = new_shape
             finally:
@@ -152,8 +178,7 @@ class Build123dShadow:
                     os.remove(temp_path)
 
         except Exception:
-            # Keeping your previous “silent fail” behavior,
-            # but if you want debugging later, print the exception here.
+            # Keep previous “silent fail” behavior.
             pass
 
     def onChanged(self, obj, prop):
@@ -162,6 +187,9 @@ class Build123dShadow:
 
 
 class Build123dViewProvider:
+    """
+    GUI-only view provider. Must not be required in headless (FreeCADCmd).
+    """
     def __init__(self, vobj):
         vobj.Proxy = self
 
@@ -176,16 +204,55 @@ class Build123dViewProvider:
 
 
 def ensure_shadow_object():
+    """
+    Headless-safe:
+      - Creates the App object always
+      - Only touches ViewObject / ViewProvider when GUI is up and ViewObject exists
+    """
     doc = FreeCAD.ActiveDocument
     if not doc:
         return None
 
     obj = doc.getObject("Build123d_Shadow")
+
     if not obj:
         obj = doc.addObject("Part::FeaturePython", "Build123d_Shadow")
         Build123dShadow(obj)
-        Build123dViewProvider(obj.ViewObject)
-        obj.ViewObject.ShapeColor = (0.0, 1.0, 0.0)
-        obj.ViewObject.Transparency = 60
+
+        # GUI-only view setup
+        if _gui_up() and hasattr(obj, "ViewObject") and obj.ViewObject:
+            try:
+                Build123dViewProvider(obj.ViewObject)
+            except Exception:
+                pass
+            try:
+                obj.ViewObject.ShapeColor = (0.0, 1.0, 0.0)
+                obj.ViewObject.Transparency = 60
+            except Exception:
+                pass
+
+    else:
+        # If it exists but is missing Proxy/properties (e.g. after reload), repair it.
+        try:
+            if not hasattr(obj, "Proxy") or obj.Proxy is None or not isinstance(obj.Proxy, Build123dShadow):
+                Build123dShadow(obj)
+        except Exception:
+            try:
+                Build123dShadow(obj)
+            except Exception:
+                pass
+
+        if _gui_up() and hasattr(obj, "ViewObject") and obj.ViewObject:
+            # Ensure a view provider exists (safe no-op if already assigned)
+            try:
+                if getattr(obj.ViewObject, "Proxy", None) is None:
+                    Build123dViewProvider(obj.ViewObject)
+            except Exception:
+                pass
+            try:
+                obj.ViewObject.ShapeColor = (0.0, 1.0, 0.0)
+                obj.ViewObject.Transparency = 60
+            except Exception:
+                pass
 
     return obj
