@@ -12,6 +12,10 @@ from core.parser import inject_code_to_freecad, parse_variables
 from core.verifier import compare_shapes
 from core.shadow import ensure_shadow_object
 
+# NEW: headless-safe engine layer
+from core.engine import SyncEngine
+from core.freecad_api import FreeCADAPI
+
 # -----------------------------------------------------------------------------
 # SELECTION -> BUILD123D SELECTOR HELPERS
 # -----------------------------------------------------------------------------
@@ -196,6 +200,9 @@ class B123dDockWidget(QtGui.QDockWidget):
         self.setWindowTitle("Code-CAD Studio")
         self.resize(520, 750)
 
+        # NEW: engine instance (headless-safe logic)
+        self.engine = SyncEngine(FreeCADAPI())
+
         main = QtGui.QWidget()
         self.setWidget(main)
         layout = QtGui.QVBoxLayout()
@@ -359,7 +366,6 @@ class B123dDockWidget(QtGui.QDockWidget):
                     try:
                         doc.removeObject(shadow.Name)
                     except Exception:
-                        # Fallback: hide & try to clear shape
                         try:
                             shadow.ViewObject.Visibility = False
                         except Exception:
@@ -444,34 +450,8 @@ class B123dDockWidget(QtGui.QDockWidget):
         self.timer_gui_to_code.start(300)
 
     def find_tip_object(self):
-        doc = FreeCAD.ActiveDocument
-        if not doc:
-            return None
-
-        candidates = set()
-        for obj in doc.Objects:
-            if obj.Name != "Build123d_Shadow" and obj.TypeId.startswith("Part::"):
-                candidates.add(obj)
-
-        if not candidates:
-            return None
-
-        parents = set()
-        for obj in candidates:
-            if hasattr(obj, "Base"):
-                if isinstance(obj.Base, (list, tuple)):
-                    for i in obj.Base:
-                        if hasattr(i, "Name"):
-                            parents.add(i)
-                else:
-                    parents.add(obj.Base)
-
-            if hasattr(obj, "EdgeLinks") and isinstance(obj.EdgeLinks, tuple) and len(obj.EdgeLinks) > 0:
-                if hasattr(obj.EdgeLinks[0], "Name"):
-                    parents.add(obj.EdgeLinks[0])
-
-        leaves = [c for c in candidates if c not in parents]
-        return leaves[-1] if leaves else None
+        # NOW delegates to engine
+        return self.engine.find_tip_object()
 
     def perform_gui_to_code(self):
         tip = self.find_tip_object()
@@ -480,7 +460,7 @@ class B123dDockWidget(QtGui.QDockWidget):
             return
 
         try:
-            code = "from build123d import *\n\n" + transpile_object(tip)
+            code = self.engine.code_from_tip(tip)
 
             # GUI->Code should NOT inject back into FreeCAD
             self.apply_code(
@@ -701,94 +681,11 @@ class B123dDockWidget(QtGui.QDockWidget):
         self.refresh_tuner_ui()
 
     # -------------------------------------------------------------------------
-    # Origin Toggle (single button)
-    # -----------------------------------------------------------------------------
-    def _ensure_origin_props(self, obj):
-        """Add per-object props if missing."""
-        if not hasattr(obj, "CodeCAD_UseB123dOrigin"):
-            obj.addProperty(
-                "App::PropertyBool",
-                "CodeCAD_UseB123dOrigin",
-                "CodeCAD",
-                "If true, prefer build123d default origin/alignment for generated code.",
-            )
-            obj.CodeCAD_UseB123dOrigin = False
-
-        if not hasattr(obj, "CodeCAD_OriginDelta"):
-            obj.addProperty(
-                "App::PropertyVector",
-                "CodeCAD_OriginDelta",
-                "CodeCAD",
-                "World-space delta applied to Placement when enabling build123d origin.",
-            )
-            obj.CodeCAD_OriginDelta = FreeCAD.Base.Vector(0, 0, 0)
-
-    def _shape_bbox_center_local(self, obj):
-        """
-        Compute bbox center in *local* coordinates (object space), even if Placement has rotation.
-        """
-        shp = getattr(obj, "Shape", None)
-        if not shp:
-            return None
-        try:
-            bb = shp.BoundBox
-            if not bb:
-                return None
-            c_world = bb.Center
-        except Exception:
-            return None
-
-        try:
-            inv = obj.Placement.inverse()
-            c_local = inv.multVec(c_world)
-            return c_local
-        except Exception:
-            try:
-                base = obj.Placement.Base
-                return FreeCAD.Base.Vector(c_world.x - base.x, c_world.y - base.y, c_world.z - base.z)
-            except Exception:
-                return None
-
-    def _find_root_object_for_origin(self, tip):
-        """
-        For origin changes, prefer applying to the *base primitive* if tip is a modifier.
-        """
-        obj = tip
-        seen = set()
-
-        while obj and hasattr(obj, "Name") and obj.Name not in seen:
-            seen.add(obj.Name)
-
-            if obj.TypeId in ["Part::Fillet", "Part::Chamfer"]:
-                base = getattr(obj, "Base", None)
-                if isinstance(base, tuple):
-                    base = base[0]
-                if base:
-                    obj = base
-                    continue
-
-            return obj
-
-        return tip
-
-    def _get_origin_state_obj(self):
-        """
-        Return (root_obj, using_b123d_origin_bool) for current tip, or (None, False).
-        """
-        tip = self.find_tip_object()
-        if not tip:
-            return None, False
-        root = self._find_root_object_for_origin(tip)
-        if not root:
-            return None, False
-        self._ensure_origin_props(root)
-        try:
-            return root, bool(root.CodeCAD_UseB123dOrigin)
-        except Exception:
-            return root, False
-
+    # Origin Toggle (now delegates to engine)
+    # -------------------------------------------------------------------------
     def update_origin_button_label(self):
-        root, using = self._get_origin_state_obj()
+        tip = self.find_tip_object()
+        root, using = self.engine.get_origin_state(tip)
         if not root:
             self.btn_origin_toggle.setText("Use build123d origin")
             self.btn_origin_toggle.setEnabled(False)
@@ -798,78 +695,19 @@ class B123dDockWidget(QtGui.QDockWidget):
         self.btn_origin_toggle.setText("Use FreeCAD origin" if using else "Use build123d origin")
 
     def toggle_origin_for_tip(self):
-        """
-        Toggle between:
-          - FreeCAD origin (default): CodeCAD_UseB123dOrigin = False
-          - build123d origin: CodeCAD_UseB123dOrigin = True and Placement shifted by bbox-center
-        """
         tip = self.find_tip_object()
         if not tip:
             return
 
-        root = self._find_root_object_for_origin(tip)
-        if not root:
-            return
-
-        self._ensure_origin_props(root)
-
-        using = bool(root.CodeCAD_UseB123dOrigin)
-
-        # ---- If currently using build123d origin -> restore FreeCAD origin (inverse)
-        if using:
-            delta_world = getattr(root, "CodeCAD_OriginDelta", FreeCAD.Base.Vector(0, 0, 0))
-            self.programmatic_update = True
-            try:
-                # Undo the prior shift exactly
-                root.Placement.Base = root.Placement.Base.add(delta_world)
-
-                # Clear flags
-                root.CodeCAD_UseB123dOrigin = False
-                root.CodeCAD_OriginDelta = FreeCAD.Base.Vector(0, 0, 0)
-
-                doc = FreeCAD.ActiveDocument
-                if doc:
-                    doc.recompute()
-
-                self.status.setText("Restored (FreeCAD origin)")
-                self.status.setStyleSheet("background: #ddf; color: blue; padding: 5px;")
-
-            finally:
-                self.programmatic_update = False
-
-            self.perform_gui_to_code()
-            self.update_origin_button_label()
-            return
-
-        # ---- Otherwise enable build123d origin
-        c_local = self._shape_bbox_center_local(root)
-        if c_local is None:
-            self.status.setText("Origin toggle failed (no bbox)")
-            self.status.setStyleSheet("background: #fdd; color: red; padding: 5px;")
-            return
-
-        # Convert local delta into world using rotation
-        try:
-            rot = root.Placement.Rotation
-            delta_world = rot.multVec(c_local)
-        except Exception:
-            delta_world = c_local
-
         self.programmatic_update = True
         try:
-            # Shift so bbox center becomes origin in local space
-            root.Placement.Base = root.Placement.Base.sub(delta_world)
-
-            root.CodeCAD_OriginDelta = delta_world
-            root.CodeCAD_UseB123dOrigin = True
-
-            doc = FreeCAD.ActiveDocument
-            if doc:
-                doc.recompute()
-
-            self.status.setText("Switched (build123d origin)")
-            self.status.setStyleSheet("background: #ddf; color: blue; padding: 5px;")
-
+            ok, msg, using = self.engine.toggle_origin_for_tip(tip)
+            if ok:
+                self.status.setText(msg)
+                self.status.setStyleSheet("background: #ddf; color: blue; padding: 5px;")
+            else:
+                self.status.setText(msg)
+                self.status.setStyleSheet("background: #fdd; color: red; padding: 5px;")
         finally:
             self.programmatic_update = False
 
