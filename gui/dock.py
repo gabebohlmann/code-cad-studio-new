@@ -1,3 +1,5 @@
+# gui/dock.py
+
 from PySide import QtGui, QtCore
 import FreeCAD
 import FreeCADGui
@@ -159,6 +161,7 @@ class B123dSelectionObserver:
             if self.panel.programmatic_update:
                 return
             self.panel.update_selector_from_current_selection()
+            self.panel.update_origin_button_label()
         except Exception:
             pass
 
@@ -167,6 +170,7 @@ class B123dSelectionObserver:
             if self.panel.programmatic_update:
                 return
             self.panel.update_selector_from_current_selection()
+            self.panel.update_origin_button_label()
         except Exception:
             pass
 
@@ -175,6 +179,7 @@ class B123dSelectionObserver:
             if self.panel.programmatic_update:
                 return
             self.panel.set_selector_text(None, hint="Select a face/edge/vertex…")
+            self.panel.update_origin_button_label()
         except Exception:
             pass
 
@@ -230,10 +235,10 @@ class B123dDockWidget(QtGui.QDockWidget):
         row.addWidget(self.btn_clear_selection)
         tools_l.addLayout(row)
 
-        # Use build123d origin button
-        self.btn_use_b123d_origin = QtGui.QPushButton("Use build123d origin")
-        self.btn_use_b123d_origin.clicked.connect(self.apply_build123d_origin_to_tip)
-        tools_l.addWidget(self.btn_use_b123d_origin)
+        # Origin toggle button (single button)
+        self.btn_origin_toggle = QtGui.QPushButton("Use build123d origin")
+        self.btn_origin_toggle.clicked.connect(self.toggle_origin_for_tip)
+        tools_l.addWidget(self.btn_origin_toggle)
 
         l1.addWidget(tools)
 
@@ -298,6 +303,7 @@ class B123dDockWidget(QtGui.QDockWidget):
         ensure_shadow_object()
         self.perform_gui_to_code()
         self.update_selector_from_current_selection()
+        self.update_origin_button_label()
 
     def closeEvent(self, e):
         try:
@@ -340,6 +346,10 @@ class B123dDockWidget(QtGui.QDockWidget):
             self.status.setStyleSheet("background: #eee; color: #555; padding: 5px;")
             self.verify_bar.setText("NO PART")
             self.verify_bar.setStyleSheet("background: #ccc; color: #555; padding: 8px;")
+
+            # Button label
+            self.btn_origin_toggle.setText("Use build123d origin")
+            self.btn_origin_toggle.setEnabled(False)
 
             # GUARANTEE: remove shadow object so nothing remains visible
             doc = FreeCAD.ActiveDocument
@@ -484,6 +494,7 @@ class B123dDockWidget(QtGui.QDockWidget):
             )
 
             self.refresh_tuner_ui()
+            self.update_origin_button_label()
         except Exception as e:
             self.status.setText(f"Transpile Error: {e}")
             self.status.setStyleSheet("background: #fdd; color: red; padding: 5px;")
@@ -511,6 +522,7 @@ class B123dDockWidget(QtGui.QDockWidget):
             verify_delay_ms=120,
         )
         self.refresh_tuner_ui()
+        self.update_origin_button_label()
 
     # -------------------------------------------------------------------------
     # Verification (deferred)
@@ -530,7 +542,6 @@ class B123dDockWidget(QtGui.QDockWidget):
             self.verify_bar.setStyleSheet("background: #ccc; color: #555; padding: 8px;")
             return
 
-        # If shadow was deleted by clear_panel_no_part, don't error — just recreate on next apply.
         if not shadow:
             self.verify_bar.setText("NO SHADOW")
             self.verify_bar.setStyleSheet("background: #ccc; color: #555; padding: 8px;")
@@ -690,8 +701,8 @@ class B123dDockWidget(QtGui.QDockWidget):
         self.refresh_tuner_ui()
 
     # -------------------------------------------------------------------------
-    # Build123d Origin Tooling (bbox-center based; fixes partial spheres)
-    # -------------------------------------------------------------------------
+    # Origin Toggle (single button)
+    # -----------------------------------------------------------------------------
     def _ensure_origin_props(self, obj):
         """Add per-object props if missing."""
         if not hasattr(obj, "CodeCAD_UseB123dOrigin"):
@@ -732,7 +743,6 @@ class B123dDockWidget(QtGui.QDockWidget):
             c_local = inv.multVec(c_world)
             return c_local
         except Exception:
-            # Fallback to translation-only
             try:
                 base = obj.Placement.Base
                 return FreeCAD.Base.Vector(c_world.x - base.x, c_world.y - base.y, c_world.z - base.z)
@@ -742,7 +752,6 @@ class B123dDockWidget(QtGui.QDockWidget):
     def _find_root_object_for_origin(self, tip):
         """
         For origin changes, prefer applying to the *base primitive* if tip is a modifier.
-        This avoids weirdness where moving a fillet object might not do what you expect.
         """
         obj = tip
         seen = set()
@@ -762,48 +771,95 @@ class B123dDockWidget(QtGui.QDockWidget):
 
         return tip
 
-    def apply_build123d_origin_to_tip(self):
+    def _get_origin_state_obj(self):
         """
-        Enable build123d origin on the current root object by shifting its Placement so that
-        bbox center (local) becomes (0,0,0). This is the key fix for partial spheres.
+        Return (root_obj, using_b123d_origin_bool) for current tip, or (None, False).
         """
         tip = self.find_tip_object()
         if not tip:
-            QtGui.QMessageBox.information(self, "Use build123d origin", "No Part:: object found.")
+            return None, False
+        root = self._find_root_object_for_origin(tip)
+        if not root:
+            return None, False
+        self._ensure_origin_props(root)
+        try:
+            return root, bool(root.CodeCAD_UseB123dOrigin)
+        except Exception:
+            return root, False
+
+    def update_origin_button_label(self):
+        root, using = self._get_origin_state_obj()
+        if not root:
+            self.btn_origin_toggle.setText("Use build123d origin")
+            self.btn_origin_toggle.setEnabled(False)
+            return
+
+        self.btn_origin_toggle.setEnabled(True)
+        self.btn_origin_toggle.setText("Use FreeCAD origin" if using else "Use build123d origin")
+
+    def toggle_origin_for_tip(self):
+        """
+        Toggle between:
+          - FreeCAD origin (default): CodeCAD_UseB123dOrigin = False
+          - build123d origin: CodeCAD_UseB123dOrigin = True and Placement shifted by bbox-center
+        """
+        tip = self.find_tip_object()
+        if not tip:
             return
 
         root = self._find_root_object_for_origin(tip)
         if not root:
-            QtGui.QMessageBox.information(self, "Use build123d origin", "No suitable object found.")
             return
 
         self._ensure_origin_props(root)
 
-        # If bbox center already ~0, treat as already using build123d origin
+        using = bool(root.CodeCAD_UseB123dOrigin)
+
+        # ---- If currently using build123d origin -> restore FreeCAD origin (inverse)
+        if using:
+            delta_world = getattr(root, "CodeCAD_OriginDelta", FreeCAD.Base.Vector(0, 0, 0))
+            self.programmatic_update = True
+            try:
+                # Undo the prior shift exactly
+                root.Placement.Base = root.Placement.Base.add(delta_world)
+
+                # Clear flags
+                root.CodeCAD_UseB123dOrigin = False
+                root.CodeCAD_OriginDelta = FreeCAD.Base.Vector(0, 0, 0)
+
+                doc = FreeCAD.ActiveDocument
+                if doc:
+                    doc.recompute()
+
+                self.status.setText("Restored (FreeCAD origin)")
+                self.status.setStyleSheet("background: #ddf; color: blue; padding: 5px;")
+
+            finally:
+                self.programmatic_update = False
+
+            self.perform_gui_to_code()
+            self.update_origin_button_label()
+            return
+
+        # ---- Otherwise enable build123d origin
         c_local = self._shape_bbox_center_local(root)
         if c_local is None:
-            QtGui.QMessageBox.warning(self, "Use build123d origin", "Could not compute bounding box center.")
+            self.status.setText("Origin toggle failed (no bbox)")
+            self.status.setStyleSheet("background: #fdd; color: red; padding: 5px;")
             return
 
-        already_centered = (
-            abs(float(c_local.x)) < 1e-6 and abs(float(c_local.y)) < 1e-6 and abs(float(c_local.z)) < 1e-6
-        )
-
-        if bool(root.CodeCAD_UseB123dOrigin) or already_centered:
-            QtGui.QMessageBox.information(self, "Use build123d origin", "Already using build123d origin.")
-            return
-
-        # Convert local vector to world direction via rotation
+        # Convert local delta into world using rotation
         try:
             rot = root.Placement.Rotation
             delta_world = rot.multVec(c_local)
         except Exception:
             delta_world = c_local
 
-        # Apply: move object so bbox center becomes origin in local space
         self.programmatic_update = True
         try:
+            # Shift so bbox center becomes origin in local space
             root.Placement.Base = root.Placement.Base.sub(delta_world)
+
             root.CodeCAD_OriginDelta = delta_world
             root.CodeCAD_UseB123dOrigin = True
 
@@ -811,11 +867,14 @@ class B123dDockWidget(QtGui.QDockWidget):
             if doc:
                 doc.recompute()
 
+            self.status.setText("Switched (build123d origin)")
+            self.status.setStyleSheet("background: #ddf; color: blue; padding: 5px;")
+
         finally:
             self.programmatic_update = False
 
-        # Force refresh (don’t rely on observers because programmatic_update may skip them)
         self.perform_gui_to_code()
+        self.update_origin_button_label()
 
 
 # -----------------------------------------------------------------------------
