@@ -1,0 +1,63 @@
+# -*- coding: utf-8 -*-
+
+# Macro Begin: C:\Users\gabeb\AppData\Roaming\FreeCAD\Mod\code-cad-studio\PartWB_Cube.FCMacro +++++++++++++++++++++++++++++++++++++++++++++++++
+import FreeCAD
+import PartDesignGui
+import Part
+import Part,PartGui
+
+# Gui.runCommand('Std_DlgMacroRecord',0)
+### Begin command Std_New
+App.newDocument()
+# App.setActiveDocument("Unnamed")
+# App.ActiveDocument=App.getDocument("Unnamed")
+# Gui.ActiveDocument=Gui.getDocument("Unnamed")
+# Gui.activeDocument().activeView().viewDefaultOrientation()
+### End command Std_New
+# Gui.runCommand('Std_OrthographicCamera',1)
+### Begin command Std_Workbench
+# Gui.activateWorkbench("PartWorkbench")
+### End command Std_Workbench
+### Begin command Part_Box
+App.ActiveDocument.addObject("Part::Box","Box")
+App.ActiveDocument.ActiveObject.Label = "Cube"
+# Object created at document root.
+App.ActiveDocument.recompute()
+# Gui.SendMsgToActiveView("ViewFit")
+### End command Part_Box
+# Gui.Selection.addSelection('Unnamed','Box')
+from FreeCAD import Base
+App.getDocument("Unnamed").Box.Length='20.00 mm'
+App.getDocument("Unnamed").Box.Width='20.00 mm'
+App.getDocument("Unnamed").Box.Height='20.00 mm'
+App.getDocument("Unnamed").Box.Placement=App.Placement(App.Vector(5.00,0.00,0.00),App.Rotation(App.Vector(1.00,0.00,1.00),0.00))
+
+# Gui.getDocument('Unnamed').resetEdit()
+from FreeCAD import Base
+# Gui.getDocument('Unnamed').resetEdit()
+# Gui.Selection.clearSelection()
+FreeCAD.getDocument('Unnamed').Label = "C"
+
+FreeCAD.getDocument('Unnamed').Label = "Cu"
+
+FreeCAD.getDocument('Unnamed').Label = "Cub"
+
+FreeCAD.getDocument('Unnamed').Label = "Cube"
+
+FreeCAD.getDocument('Unnamed').Label = "CubeD"
+
+FreeCAD.getDocument('Unnamed').Label = "CubeDo"
+
+FreeCAD.getDocument('Unnamed').Label = "CubeDoc"
+
+FreeCAD.getDocument('Unnamed').Label = "CubeDocu"
+
+FreeCAD.getDocument('Unnamed').Label = "CubeDocum"
+
+FreeCAD.getDocument('Unnamed').Label = "CubeDocume"
+
+FreeCAD.getDocument('Unnamed').Label = "CubeDocumen"
+
+FreeCAD.getDocument('Unnamed').Label = "CubeDocument"
+
+# Macro End: C:\Users\gabeb\AppData\Roaming\FreeCAD\Mod\code-cad-studio\PartWB_Cube.FCMacro +++++++++++++++++++++++++++++++++++++++++++++++++
