@@ -1,0 +1,132 @@
+# server/app.py
+
+import os
+import threading
+from typing import Dict, Any
+
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+
+from server.freecad_runner import JobStore, run_freecad_job, Job
+
+
+def norm(p: str) -> str:
+    return os.path.abspath(p).replace("\\", "/")
+
+
+# ---- config (portable to remote later via env vars)
+FREECAD_CMD = os.environ.get(
+    "FREECAD_CMD",
+    r"C:\Program Files\FreeCAD 1.0\bin\FreeCADCmd.exe",
+)
+
+# server/ is inside mod_root/server; web/ is mod_root/web; cli/run.py is mod_root/cli/run.py
+MOD_ROOT = norm(os.path.dirname(os.path.dirname(__file__)))
+RUN_PY = norm(os.path.join(MOD_ROOT, "cli", "run.py"))
+WEB_DIR = norm(os.path.join(MOD_ROOT, "web"))
+
+store = JobStore()
+jobs: Dict[str, Job] = {}
+
+
+class RenderRequest(BaseModel):
+    code: str
+    mesh_quality: str = "preview"  # preview|final
+    verbose: bool = True
+
+
+class RenderResponse(BaseModel):
+    job_id: str
+
+
+app = FastAPI(title="CodeCADStudio API", version="0.1.0")
+
+# CORS is not strictly needed once frontend is served by this same server,
+# but leaving it permissive is convenient for dev.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+def _run_in_thread(job_id: str, req: RenderRequest):
+    result = run_freecad_job(
+        freecad_cmd=FREECAD_CMD,
+        run_py=RUN_PY,
+        code_text=req.code,
+        mesh_quality=req.mesh_quality,
+        verbose=req.verbose,
+    )
+    result.id = job_id
+    jobs[job_id] = result
+
+
+# -------------------
+# Frontend hosting
+# -------------------
+# Serve /main.js etc.
+if os.path.isdir(WEB_DIR):
+    app.mount("/web", StaticFiles(directory=WEB_DIR), name="web")
+
+
+@app.get("/")
+def root():
+    index = os.path.join(WEB_DIR, "index.html")
+    if not os.path.exists(index):
+        raise HTTPException(status_code=404, detail="web/index.html not found")
+    return FileResponse(index, media_type="text/html")
+
+
+@app.get("/api/v1/health")
+def health():
+    return {
+        "ok": True,
+        "freecad_cmd": norm(FREECAD_CMD),
+        "run_py": RUN_PY,
+        "web_dir": WEB_DIR,
+    }
+
+
+@app.post("/api/v1/jobs", response_model=RenderResponse)
+def create_job(req: RenderRequest):
+    j = store.create()
+    jobs[j.id] = j
+
+    t = threading.Thread(target=_run_in_thread, args=(j.id, req), daemon=True)
+    t.start()
+
+    return RenderResponse(job_id=j.id)
+
+
+@app.get("/api/v1/jobs/{job_id}")
+def job_status(job_id: str) -> Dict[str, Any]:
+    j = jobs.get(job_id)
+    if not j:
+        raise HTTPException(status_code=404, detail="job not found")
+
+    tail = j.logs[-300:]
+    return {
+        "id": j.id,
+        "status": j.status,
+        "error": j.error,
+        "logs": tail,
+        "mesh_available": bool(j.mesh_path and os.path.exists(j.mesh_path)),
+    }
+
+
+@app.get("/api/v1/jobs/{job_id}/mesh")
+def job_mesh(job_id: str):
+    j = jobs.get(job_id)
+    if not j:
+        raise HTTPException(status_code=404, detail="job not found")
+    if j.status != "done":
+        raise HTTPException(status_code=409, detail=f"job not done (status={j.status})")
+    if not j.mesh_path or not os.path.exists(j.mesh_path):
+        raise HTTPException(status_code=404, detail="mesh not found")
+    return FileResponse(j.mesh_path, media_type="model/stl", filename="out.stl")

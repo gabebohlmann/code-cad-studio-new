@@ -1,3 +1,6 @@
 core/__pycache__
 gui/__pycache__
 cli/__pycache__
+__pycache__/
+*.pyc
+server/.venv/
