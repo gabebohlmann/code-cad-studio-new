@@ -19,6 +19,7 @@ class Job:
     logs: List[str] = field(default_factory=list)
     error: Optional[str] = None
     mesh_path: Optional[str] = None
+    shapes_path: Optional[str] = None
     code_path: Optional[str] = None
     work_dir: Optional[str] = None
 
@@ -59,16 +60,23 @@ def run_freecad_job(
     try:
         code_path = norm(os.path.join(work_dir, "input.py"))
         mesh_path = norm(os.path.join(work_dir, "out.stl"))
+        shapes_path = norm(os.path.join(work_dir, "out.json"))
         log_path = norm(os.path.join(work_dir, "run.log"))
 
         job.code_path = code_path
         job.mesh_path = mesh_path
+        job.shapes_path = shapes_path
 
         with open(code_path, "w", encoding="utf-8") as f:
             f.write(code_text)
 
         # NOTE: do NOT embed extra quotes here. This is one single string argument.
-        pass_args = f"--code {code_path} --mesh {mesh_path} --mesh-quality {mesh_quality}"
+        pass_args = (
+            f"--code {code_path} "
+            f"--mesh {mesh_path} "
+            f"--mesh-quality {mesh_quality} "
+            f"--shapes {shapes_path}"
+        )
         if verbose:
             pass_args += " --verbose"
 
@@ -120,10 +128,15 @@ def run_freecad_job(
             job.error = f"FreeCADCmd exited with code {rc}"
             return job
 
-        if not os.path.exists(mesh_path):
+        # Keep STL check (useful for downloads), but require shapes for the viewer path.
+        if not os.path.exists(shapes_path):
             job.status = "error"
-            job.error = "Mesh not created (out.stl missing)"
+            job.error = "Shapes not created (out.json missing)"
             return job
+
+        # STL is optional for the web viewer path; warn only.
+        if not os.path.exists(mesh_path):
+            job.logs.append("[server] WARNING: out.stl missing (viewer can still use out.json)")
 
         job.status = "done"
         return job
@@ -133,4 +146,4 @@ def run_freecad_job(
         job.error = str(e)
         return job
 
-    # NOTE: keep work_dir around so mesh/log can be downloaded later.
+    # NOTE: keep work_dir around so artifacts/log can be downloaded later.

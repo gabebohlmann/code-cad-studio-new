@@ -117,6 +117,7 @@ def job_status(job_id: str) -> Dict[str, Any]:
         "error": j.error,
         "logs": tail,
         "mesh_available": bool(j.mesh_path and os.path.exists(j.mesh_path)),
+        "shapes_available": bool(j.shapes_path and os.path.exists(j.shapes_path)),
     }
 
 
@@ -130,3 +131,15 @@ def job_mesh(job_id: str):
     if not j.mesh_path or not os.path.exists(j.mesh_path):
         raise HTTPException(status_code=404, detail="mesh not found")
     return FileResponse(j.mesh_path, media_type="model/stl", filename="out.stl")
+
+
+@app.get("/api/v1/jobs/{job_id}/shapes")
+def job_shapes(job_id: str):
+    j = jobs.get(job_id)
+    if not j:
+        raise HTTPException(status_code=404, detail="job not found")
+    if j.status != "done":
+        raise HTTPException(status_code=409, detail=f"job not done (status={j.status})")
+    if not j.shapes_path or not os.path.exists(j.shapes_path):
+        raise HTTPException(status_code=404, detail="shapes not found")
+    return FileResponse(j.shapes_path, media_type="application/json", filename="out.json")

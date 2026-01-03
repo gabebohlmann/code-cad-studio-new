@@ -1,3 +1,5 @@
+<!-- web/index.html -->
+
 <!doctype html>
 <html lang="en">
   <head>
@@ -18,15 +20,11 @@
       .badge { font-size: 12px; padding: 2px 8px; border-radius: 999px; background: #eee; display: inline-block; }
     </style>
 
-    <!-- Import map: make "three" resolvable in the browser (no bundler needed) -->
-    <script type="importmap">
-      {
-        "imports": {
-          "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
-          "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
-        }
-      }
-    </script>
+    <!-- three-cad-viewer styles -->
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/three-cad-viewer@3.5.1/dist/three-cad-viewer.css"
+    />
   </head>
   <body>
     <div id="top">

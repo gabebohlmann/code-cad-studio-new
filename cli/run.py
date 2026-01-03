@@ -5,6 +5,8 @@ import sys
 import shlex
 import argparse
 import traceback
+import json
+import math
 
 import FreeCAD
 
@@ -13,6 +15,7 @@ import FreeCAD
 # Logging: stdout + optional log file
 # ----------------------------
 _LOG_FH = None
+
 
 def _linebuf():
     try:
@@ -117,11 +120,13 @@ def _export_step(doc, out_path: str):
     out_path = _normalize_path(out_path)
     try:
         import Import
+
         Import.export(doc.Objects, out_path)
         return True, f"Exported STEP: {out_path}"
     except Exception as e1:
         try:
             import ImportGui
+
             ImportGui.export(doc.Objects, out_path)
             return True, f"Exported STEP via ImportGui: {out_path}"
         except Exception as e2:
@@ -169,6 +174,7 @@ def _gather_target_shape(doc):
 
     try:
         import Part
+
         return shapes[0] if len(shapes) == 1 else Part.makeCompound(shapes)
     except Exception:
         return shapes[0]
@@ -205,6 +211,174 @@ def _export_mesh_stl(doc, out_path: str, quality: str):
 
 
 # ----------------------------
+# three-cad-viewer Shapes JSON exporter (protocol v3)
+# ----------------------------
+def _vec3(v):
+    try:
+        return (float(v.x), float(v.y), float(v.z))
+    except Exception:
+        return (float(v[0]), float(v[1]), float(v[2]))
+
+
+def _sub(a, b):
+    return (a[0] - b[0], a[1] - b[1], a[2] - b[2])
+
+
+def _cross(a, b):
+    return (
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    )
+
+
+def _norm(a):
+    return math.sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2])
+
+
+def _normalize(a):
+    n = _norm(a)
+    if n <= 1e-12:
+        return (0.0, 0.0, 1.0)
+    return (a[0] / n, a[1] / n, a[2] / n)
+
+
+def _bbox_from_vertices_flat(verts_flat):
+    xs = verts_flat[0::3]
+    ys = verts_flat[1::3]
+    zs = verts_flat[2::3]
+    return {
+        "xmin": float(min(xs, default=0.0)),
+        "xmax": float(max(xs, default=0.0)),
+        "ymin": float(min(ys, default=0.0)),
+        "ymax": float(max(ys, default=0.0)),
+        "zmin": float(min(zs, default=0.0)),
+        "zmax": float(max(zs, default=0.0)),
+    }
+
+
+def _export_three_cad_viewer_shapes_json(doc, out_path: str, quality: str):
+    out_path = _normalize_path(out_path)
+
+    shape = _gather_target_shape(doc)
+    if shape is None:
+        return False, "Shapes JSON not created (no Part shapes in document)"
+
+    q = (quality or "preview").lower().strip()
+
+    # Keep consistent with your STL preview/final intent.
+    if q == "final":
+        linear_defl = 0.05
+        edge_defl = 0.20
+    else:
+        linear_defl = 0.30
+        edge_defl = 0.80
+
+    # ---- Triangles
+    # We duplicate vertices per triangle so normals can stay sharp (no smoothing across faces).
+    verts_flat = []
+    norms_flat = []
+    tris_flat = []
+
+    try:
+        pts, facets = shape.tessellate(float(linear_defl))
+        pts = [_vec3(p) for p in pts]
+
+        vidx = 0
+        for f in facets:
+            idxs = list(f)
+            if len(idxs) < 3:
+                continue
+
+            # fan triangulation if polygon
+            for t in range(1, len(idxs) - 1):
+                p0 = pts[idxs[0]]
+                p1 = pts[idxs[t]]
+                p2 = pts[idxs[t + 1]]
+
+                n = _normalize(_cross(_sub(p1, p0), _sub(p2, p0)))
+
+                verts_flat.extend(
+                    [
+                        p0[0],
+                        p0[1],
+                        p0[2],
+                        p1[0],
+                        p1[1],
+                        p1[2],
+                        p2[0],
+                        p2[1],
+                        p2[2],
+                    ]
+                )
+                norms_flat.extend([n[0], n[1], n[2]] * 3)
+                tris_flat.extend([vidx, vidx + 1, vidx + 2])
+                vidx += 3
+
+    except Exception as e:
+        return False, f"Shapes tessellation failed: {e}"
+
+    # ---- Edges (flattened as segments)
+    edges_flat = []
+    try:
+        for e in getattr(shape, "Edges", []) or []:
+            try:
+                pts_e = e.discretize(Deflection=float(edge_defl))
+                pts_e = [_vec3(p) for p in pts_e]
+                for i in range(len(pts_e) - 1):
+                    a = pts_e[i]
+                    b = pts_e[i + 1]
+                    edges_flat.extend([a[0], a[1], a[2], b[0], b[1], b[2]])
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    bb = _bbox_from_vertices_flat(verts_flat)
+
+    # Protocol v3 expects loc as [[x,y,z],[qx,qy,qz,qw]] (not a flat list)
+    ident_loc = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]]
+
+    shapes = {
+        "version": 3,
+        "parts": [
+            {
+                "id": "/Group/Part_0",
+                "type": "shapes",
+                "subtype": "solid",
+                "name": "Part_0",
+                "shape": {
+                    "vertices": verts_flat,
+                    "triangles": tris_flat,
+                    "normals": norms_flat,
+                    "edges": edges_flat,
+                },
+                "state": [1, 1],
+                "color": "#cccccc",
+                "alpha": 1.0,
+                "texture": None,
+                "loc": ident_loc,
+                "renderback": False,
+                "accuracy": None,
+                "bb": None,
+            }
+        ],
+        "loc": ident_loc,
+        "name": "Group",
+        "id": "/Group",
+        "normal_len": 0,
+        "bb": bb,
+    }
+
+    try:
+        with open(out_path, "w", encoding="utf-8") as f:
+            json.dump(shapes, f)
+        return True, f"Exported Shapes JSON ({q}): {out_path}"
+    except Exception as e:
+        return False, f"Shapes JSON save failed: {e}"
+
+
+# ----------------------------
 # Main
 # ----------------------------
 def main(argv=None):
@@ -224,6 +398,7 @@ def main(argv=None):
     parser.add_argument("--out", required=False, help="Output .FCStd or .step/.stp path")
     parser.add_argument("--mesh", required=False, help="Optional STL output path (.stl)")
     parser.add_argument("--mesh-quality", required=False, default="preview", choices=["preview", "final"])
+    parser.add_argument("--shapes", required=False, help="Optional Shapes JSON output path (.json)")
     parser.add_argument("--verbose", action="store_true", help="Verbose logging")
     args = parser.parse_args(argv)
 
@@ -232,12 +407,14 @@ def main(argv=None):
     code_path = _normalize_path(args.code)
     out_path = _normalize_path(args.out) if args.out else None
     mesh_path = _normalize_path(args.mesh) if args.mesh else None
+    shapes_path = _normalize_path(args.shapes) if args.shapes else None
 
     if args.verbose:
         _log(f"[CodeCADStudio] mod_root={mod_root}")
         _log(f"[CodeCADStudio] code={code_path}")
         _log(f"[CodeCADStudio] out ={out_path}")
         _log(f"[CodeCADStudio] mesh={mesh_path}")
+        _log(f"[CodeCADStudio] shapes={shapes_path}")
         _log(f"[CodeCADStudio] mesh_quality={args.mesh_quality}")
 
     if not os.path.exists(code_path):
@@ -292,6 +469,12 @@ def main(argv=None):
             _log("[CodeCADStudio] " + msg)
             if not ok:
                 return 7
+
+        if shapes_path:
+            ok, msg = _export_three_cad_viewer_shapes_json(doc, shapes_path, args.mesh_quality)
+            _log("[CodeCADStudio] " + msg)
+            if not ok:
+                return 8
 
         return 0
 

@@ -1,8 +1,14 @@
 // web/main.js
 
-import * as THREE from "three";
-import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-import { STLLoader } from "three/addons/loaders/STLLoader.js";
+// three-cad-viewer based web UI (no raw three.js)
+//
+// Requires server endpoint:
+//   GET /api/v1/jobs/{job_id}/shapes  -> returns Shapes JSON (protocol v3)
+
+import {
+  Viewer,
+  Display,
+} from "https://cdn.jsdelivr.net/npm/three-cad-viewer@3.5.1/dist/three-cad-viewer.esm.min.js";
 
 const API = "/api/v1";
 
@@ -40,71 +46,88 @@ part = Box(L, W, H)
 `;
 
 // --------------------
-// Three.js viewer setup
+// three-cad-viewer setup
 // --------------------
-const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x111111);
+let viewer = null;
+let display = null;
 
-const camera = new THREE.PerspectiveCamera(
-  45,
-  elViewer.clientWidth / elViewer.clientHeight,
-  0.1,
-  100000
-);
-camera.position.set(120, 80, 120);
+// Keep these as module-level so render() can pass them every time.
+// (This matches the library's own "Skeleton" example.) :contentReference[oaicite:1]{index=1}
+let displayOptions = null;
+let renderOptions = null;
+let viewerOptions = null;
 
-const renderer = new THREE.WebGLRenderer({ antialias: true });
-renderer.setSize(elViewer.clientWidth, elViewer.clientHeight);
-elViewer.appendChild(renderer.domElement);
-
-const controls = new OrbitControls(camera, renderer.domElement);
-controls.enableDamping = true;
-
-const hemi = new THREE.HemisphereLight(0xffffff, 0x222222, 1.2);
-scene.add(hemi);
-
-const dir = new THREE.DirectionalLight(0xffffff, 1.0);
-dir.position.set(100, 200, 150);
-scene.add(dir);
-
-// helper grid
-const grid = new THREE.GridHelper(400, 40);
-scene.add(grid);
-
-let currentMesh = null;
-
-function fitCameraToObject(obj) {
-  const box = new THREE.Box3().setFromObject(obj);
-  const size = box.getSize(new THREE.Vector3());
-  const center = box.getCenter(new THREE.Vector3());
-
-  const maxDim = Math.max(size.x, size.y, size.z);
-  const fov = camera.fov * (Math.PI / 180);
-  let cameraZ = Math.abs(maxDim / 2 / Math.tan(fov / 2));
-  cameraZ *= 2.2;
-
-  camera.position.set(center.x + cameraZ, center.y + cameraZ * 0.6, center.z + cameraZ);
-  camera.near = cameraZ / 100;
-  camera.far = cameraZ * 100;
-  camera.updateProjectionMatrix();
-
-  controls.target.copy(center);
-  controls.update();
+function notifyChange(change) {
+  // You can later forward pick/selection events back to FreeCAD.
+  try {
+    const pick = change?.lastPick?.new;
+    if (pick) console.log("picked:", pick);
+  } catch {
+    // ignore
+  }
 }
 
-function animate() {
-  requestAnimationFrame(animate);
-  controls.update();
-  renderer.render(scene, camera);
-}
-animate();
+function buildOptions() {
+  const w = Math.max(200, elViewer.clientWidth || 800);
+  const h = Math.max(200, elViewer.clientHeight || 600);
 
+  displayOptions = {
+    cadWidth: w,
+    height: h,
+    treeWidth: 260,
+    theme: "dark",
+    pinning: true,
+    keymap: {
+      shift: "shiftKey",
+      ctrl: "ctrlKey",
+      meta: "metaKey",
+    },
+  };
+
+  // Reasonable defaults (similar to README skeleton) :contentReference[oaicite:2]{index=2}
+  renderOptions = {
+    ambientIntensity: 1.0,
+    directIntensity: 1.1,
+    metalness: 0.3,
+    roughness: 0.65,
+    edgeColor: 0x707070,
+    defaultOpacity: 1.0,
+    normalLen: 0,
+  };
+
+  viewerOptions = {
+    target: [0, 0, 0],
+    up: "Z",
+  };
+}
+
+function createCadViewer() {
+  buildOptions();
+
+  // wipe old DOM contents
+  elViewer.innerHTML = "";
+
+  // create display + viewer exactly as the upstream skeleton does :contentReference[oaicite:3]{index=3}
+  display = new Display(elViewer, displayOptions);
+  viewer = new Viewer(display, viewerOptions, notifyChange);
+
+  return viewer;
+}
+
+createCadViewer();
+
+let _resizeTimer = null;
 window.addEventListener("resize", () => {
-  const w = elViewer.clientWidth;
-  const h = elViewer.clientHeight;
-  camera.aspect = w / h;
-  camera.updateProjectionMatrix();
-  renderer.setSize(w, h);
+  // Debounce to avoid thrashing while resizing.
+  if (_resizeTimer) clearTimeout(_resizeTimer);
+  _resizeTimer = setTimeout(() => {
+    try {
+      viewer?.clear?.();
+    } catch {
+      // ignore
+    }
+    createCadViewer();
+  }, 120);
 });
 
 // --------------------
@@ -133,37 +156,31 @@ async function getJob(jobId) {
   return await res.json();
 }
 
-async function loadMesh(jobId) {
-  const url = `${API}/jobs/${jobId}/mesh`;
-  const loader = new STLLoader();
-
-  return new Promise((resolve, reject) => {
-    loader.load(
-      url,
-      (geometry) => {
-        geometry.computeVertexNormals();
-        const material = new THREE.MeshStandardMaterial({ metalness: 0.1, roughness: 0.7 });
-        const mesh = new THREE.Mesh(geometry, material);
-        resolve(mesh);
-      },
-      undefined,
-      (err) => reject(err)
-    );
-  });
-}
-
-function replaceMesh(mesh) {
-  if (currentMesh) {
-    scene.remove(currentMesh);
-    currentMesh.geometry.dispose();
-    // material disposed by GC usually, but let's be explicit if possible
-    if (currentMesh.material && currentMesh.material.dispose) currentMesh.material.dispose();
+async function loadShapes(jobId) {
+  const res = await fetch(`${API}/jobs/${jobId}/shapes`);
+  if (!res.ok) {
+    const t = await res.text();
+    throw new Error(`GET /jobs/${jobId}/shapes failed (${res.status}): ${t}`);
   }
-  currentMesh = mesh;
-  scene.add(mesh);
-  fitCameraToObject(mesh);
+  return await res.json();
 }
 
+function showShapes(shapes) {
+  if (!viewer) createCadViewer();
+
+  try {
+    viewer.clear?.();
+  } catch {
+    // ignore
+  }
+
+  // IMPORTANT: pass renderOptions + viewerOptions like the upstream skeleton :contentReference[oaicite:4]{index=4}
+  viewer.render(shapes, renderOptions, viewerOptions);
+}
+
+// --------------------
+// Render loop (job submit + poll + show)
+// --------------------
 async function render(mesh_quality) {
   setBusy(true);
   setStatus("submitting…");
@@ -180,7 +197,7 @@ async function render(mesh_quality) {
     while (true) {
       const j = await getJob(job_id);
 
-      // stream logs in the simplest way (polling)
+      // stream logs (poll)
       const logs = j.logs || [];
       if (logs.length > lastLogLen) {
         for (let i = lastLogLen; i < logs.length; i++) log(logs[i]);
@@ -193,12 +210,12 @@ async function render(mesh_quality) {
       await new Promise((r) => setTimeout(r, 300));
     }
 
-    setStatus("loading mesh…");
-    const mesh = await loadMesh(job_id);
-    replaceMesh(mesh);
+    setStatus("loading shapes…");
+    const shapes = await loadShapes(job_id);
+    showShapes(shapes);
 
     setStatus("done");
-    log("mesh loaded");
+    log("shapes loaded");
   } catch (e) {
     setStatus("error");
     log(String(e));
