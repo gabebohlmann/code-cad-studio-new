@@ -1,7 +1,7 @@
 # core/shadow.py
 
 import FreeCAD
-import FreeCAD.Part as PartModule
+import Part as PartModule
 import tempfile
 import os
 

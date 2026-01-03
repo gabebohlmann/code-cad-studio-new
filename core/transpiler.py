@@ -12,11 +12,6 @@ def fingerprint(edge):
 
 
 def _safe_center(geo_shape):
-    """
-    Robustly get a point-like center for Vertex/Edge/Face objects returned by FreeCAD.
-    - Part.Vertex often has .Point (but may not have CenterOfMass reliably)
-    - Part.Shape of ShapeType 'Vertex' may expose Vertexes[0].Point
-    """
     if hasattr(geo_shape, "Point"):
         try:
             return geo_shape.Point
@@ -46,10 +41,6 @@ def _safe_center(geo_shape):
 
 
 def solve_selector(geo_shape):
-    """
-    Return a build123d selector string for a FreeCAD subshape.
-    Supports: Vertex, Edge, Face. Returns None for Compound/unsupported.
-    """
     try:
         if not geo_shape:
             return None
@@ -179,7 +170,9 @@ def _use_b123d_origin(obj) -> bool:
 
 def _bbox_center_local(obj):
     """
-    Return bounding-box center in *local* object coordinates (object space).
+    IMPORTANT:
+    In FreeCAD, obj.Shape is typically local; Placement is separate.
+    So Shape.BoundBox.Center is already local for Part:: primitives.
     """
     try:
         shp = getattr(obj, "Shape", None)
@@ -188,16 +181,9 @@ def _bbox_center_local(obj):
         bb = shp.BoundBox
         if not bb:
             return None
-        c_world = bb.Center
-
-        inv = obj.Placement.inverse()
-        return inv.multVec(c_world)
+        return bb.Center
     except Exception:
-        try:
-            base = obj.Placement.Base
-            return FreeCAD.Base.Vector(c_world.x - base.x, c_world.y - base.y, c_world.z - base.z)
-        except Exception:
-            return None
+        return None
 
 
 # -----------------------------------------------------------------------------
@@ -206,31 +192,18 @@ def _bbox_center_local(obj):
 def transpile_object(obj):
     header = f"# {obj.Name}\n"
 
-    # -------------------------
-    # Box
-    # -------------------------
     if obj.TypeId == "Part::Box":
         l, w, h = obj.Length.Value, obj.Width.Value, obj.Height.Value
-
         if _use_b123d_origin(obj):
             return f"{header}part = Box({l}, {w}, {h})"
-
         return f"{header}part = Box({l}, {w}, {h}, align=(Align.MIN, Align.MIN, Align.MIN))"
 
-    # -------------------------
-    # Cylinder
-    # -------------------------
     elif obj.TypeId == "Part::Cylinder":
         r, h = obj.Radius.Value, obj.Height.Value
-
         if _use_b123d_origin(obj):
             return f"{header}part = Cylinder(radius={r}, height={h})"
-
         return f"{header}part = Cylinder(radius={r}, height={h}, align=(Align.CENTER, Align.CENTER, Align.MIN))"
 
-    # -------------------------
-    # Cone
-    # -------------------------
     elif obj.TypeId == "Part::Cone":
         r1 = float(getattr(obj, "Radius1", 5.0))
         r2 = float(getattr(obj, "Radius2", 2.0))
@@ -254,9 +227,6 @@ def transpile_object(obj):
             return f"{header}part = Cone(bottom_radius={r1}, top_radius={r2}, height={h}, align=(Align.CENTER, Align.CENTER, Align.MIN))"
         return f"{header}part = Cone(bottom_radius={r1}, top_radius={r2}, height={h}, arc_size={ang}, align=(Align.CENTER, Align.CENTER, Align.MIN))"
 
-    # -------------------------
-    # Sphere
-    # -------------------------
     elif obj.TypeId == "Part::Sphere":
         r = obj.Radius.Value
         a1 = float(getattr(obj, "Angle1", -90.0))
@@ -286,9 +256,6 @@ def transpile_object(obj):
 
         return "\n".join(lines)
 
-    # -------------------------
-    # Torus  ✅ NEW
-    # -------------------------
     elif obj.TypeId == "Part::Torus":
         R1 = float(getattr(obj, "Radius1", 10.0))  # major
         R2 = float(getattr(obj, "Radius2", 2.0))   # minor
@@ -308,7 +275,6 @@ def transpile_object(obj):
         if is_full:
             return f"{header}part = Torus(major_radius={R1}, minor_radius={R2})"
 
-        # Emit only non-default angle params
         args = [f"major_radius={R1}", f"minor_radius={R2}"]
         if not _is_default(a1, 0.0):
             args.append(f"minor_start_angle={a1}")
@@ -319,8 +285,6 @@ def transpile_object(obj):
 
         lines = [f"{header}part = Torus({', '.join(args)})"]
 
-        # Same idea as partial sphere: FreeCAD is "parametric-center anchored",
-        # build123d is effectively bbox-centered, so shift unless user opted into b123d origin.
         if not _use_b123d_origin(obj):
             c_local = _bbox_center_local(obj)
             if c_local is not None:
@@ -330,9 +294,6 @@ def transpile_object(obj):
 
         return "\n".join(lines)
 
-    # -------------------------
-    # Fillet / Chamfer
-    # -------------------------
     elif obj.TypeId in ["Part::Fillet", "Part::Chamfer"]:
         parent = None
         if hasattr(obj, "Base"):

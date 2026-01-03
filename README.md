@@ -20,6 +20,20 @@ A FreeCAD workbench for bidirectional sync between FreeCAD and a Build123d code 
                         off = getattr(obj, "DisplayOffset", FreeCAD.Base.Vector(60, 0, 0))
   1. Add a shadow offset button
   1. Mitigate code execution safety issues discussed in the api/macro chatgpt chat below
+  1. in core/freecad_api.py  Add save_as(path) helper (so engine/CLI scripts don’t reach into FreeCAD directly).
+  1. Make selectors work in CLI. Here is a chatgpt note on it " What to do with selection + tuner features?
+
+    Selection (FreeCADGui.Selection) and tuner sliders (Qt widgets) are GUI-only by nature.
+
+    If you want parity in headless, the equivalent is:
+
+    headless: accept “selector requests” via API arguments (e.g., “pick the top face”) or by stable naming
+
+    GUI: generate those selector expressions automatically from the current selection (your existing code)
+
+    So: keep selection generation in gui/, and keep selector execution (pure build123d text inserted into code) in core/."
+  1. Possibly remove all FreeCAD.(...) or at least FreeCAD.Part as it is apparently error causing from within FreeCAD python env (use just Part or other)
+  
 
 ## Build123d algebra mode vs. FreeCAD Part Workbench feature parity
   * b123d object class works with algebra and builder mode so some objects that are based on sketch geometry (Part Design WB) in FC don't work with in FC Part WB such as Hole, CounterSinkHole, CounterBoleHole. Wedge is a bulit in object in b123d that would need to built by an extruded custom polygon in FC I believe

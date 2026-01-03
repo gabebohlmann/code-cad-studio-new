@@ -1,11 +1,9 @@
 # core/engine.py
 
-# core/engine.py
-
 import FreeCAD
 
 from core.transpiler import transpile_object
-from core.parser import inject_code_to_freecad
+from core.parser import inject_code_to_freecad, parse_variables
 from core.shadow import ensure_shadow_object
 from core.verifier import compare_shapes
 
@@ -25,7 +23,16 @@ class SyncEngine:
         self.api = api
 
     # -------------------------------------------------------------------------
-    # Tip discovery (same logic you had in Dock)
+    # Convenience: UI helpers that are still non-GUI (so GUI doesn't import core/*)
+    # -------------------------------------------------------------------------
+    def parse_variables(self, code: str):
+        try:
+            return parse_variables(code)
+        except Exception:
+            return []
+
+    # -------------------------------------------------------------------------
+    # Tip discovery
     # -------------------------------------------------------------------------
     def find_tip_object(self, doc=None):
         doc = doc or self.api.active_doc()
@@ -70,15 +77,27 @@ class SyncEngine:
     # -------------------------------------------------------------------------
     def apply_code_to_freecad(self, code: str):
         """
-        Apply code to FreeCAD primitives/params (your parser.inject_code_to_freecad).
+        Apply code to FreeCAD primitives/params (parser.inject_code_to_freecad).
         Returns (success, message).
         """
         return inject_code_to_freecad(code)
 
+    def ensure_shadow(self):
+        """Ensure the shadow object exists (headless-safe)."""
+        return ensure_shadow_object()
+
+    def get_shadow_object(self, doc=None):
+        doc = doc or self.api.active_doc()
+        if not doc:
+            return None
+        try:
+            return doc.getObject("Build123d_Shadow")
+        except Exception:
+            return None
+
     def update_shadow_code(self, code: str):
         """
         Update the shadow object's Code property.
-        NOTE: ensure_shadow_object must be headless-safe; if not, patch it (see note below).
         """
         shadow = ensure_shadow_object()
         if shadow:
@@ -89,6 +108,25 @@ class SyncEngine:
                 pass
         return shadow
 
+    def remove_shadow(self, doc=None):
+        """
+        Remove the shadow object if present.
+        Headless-safe: no ViewObject usage.
+        """
+        doc = doc or self.api.active_doc()
+        if not doc:
+            return False
+
+        shadow = self.get_shadow_object(doc)
+        if not shadow:
+            return True
+
+        try:
+            doc.removeObject(shadow.Name)
+            return True
+        except Exception:
+            return False
+
     # -------------------------------------------------------------------------
     # Verification
     # -------------------------------------------------------------------------
@@ -96,7 +134,7 @@ class SyncEngine:
         return compare_shapes(tip_obj, shadow_obj)
 
     # -------------------------------------------------------------------------
-    # Origin toggle (moved from Dock; GUI calls this)
+    # Origin toggle
     # -------------------------------------------------------------------------
     def _ensure_origin_props(self, obj):
         """Add per-object props if missing."""
@@ -120,7 +158,9 @@ class SyncEngine:
 
     def _shape_bbox_center_local(self, obj):
         """
-        Compute bbox center in *local* coordinates (object space), even if Placement has rotation.
+        IMPORTANT:
+        In FreeCAD, obj.Shape is typically in *local* coordinates; Placement is applied separately.
+        Therefore Shape.BoundBox.Center is already local for Part:: primitives.
         """
         shp = getattr(obj, "Shape", None)
         if not shp:
@@ -129,20 +169,9 @@ class SyncEngine:
             bb = shp.BoundBox
             if not bb:
                 return None
-            c_world = bb.Center
+            return bb.Center
         except Exception:
             return None
-
-        try:
-            inv = obj.Placement.inverse()
-            c_local = inv.multVec(c_world)
-            return c_local
-        except Exception:
-            try:
-                base = obj.Placement.Base
-                return FreeCAD.Base.Vector(c_world.x - base.x, c_world.y - base.y, c_world.z - base.z)
-            except Exception:
-                return None
 
     def _find_root_object_for_origin(self, tip):
         """
@@ -199,7 +228,7 @@ class SyncEngine:
 
         using = bool(root.CodeCAD_UseB123dOrigin)
 
-        # ---- If currently using build123d origin -> restore FreeCAD origin (inverse)
+        # ---- If currently using build123d origin -> restore FreeCAD origin
         if using:
             delta_world = getattr(root, "CodeCAD_OriginDelta", FreeCAD.Base.Vector(0, 0, 0))
             try:
@@ -231,3 +260,47 @@ class SyncEngine:
             return True, "Switched (build123d origin)", True
         except Exception:
             return False, "Failed to switch origin", False
+
+    def apply_pipeline(self, code: str, *, make_shadow: bool = True, verify: bool = True):
+        """
+        Headless-safe "one call" pipeline.
+        Returns dict with fields you can show in GUI or return from server.
+        """
+        ok, msg = self.apply_code_to_freecad(code)
+
+        if not ok:
+            return {
+                "ok": False,
+                "message": msg,
+                "tip": None,
+                "shadow": None,
+                "verified": False,
+                "verify_reason": "Not verified",
+            }
+
+        shadow = None
+        if make_shadow:
+            shadow = self.update_shadow_code(code)
+
+        self.api.recompute()
+
+        tip = self.find_tip_object()
+        if not tip or not shadow or not verify:
+            return {
+                "ok": True,
+                "message": msg,
+                "tip": tip,
+                "shadow": shadow,
+                "verified": False,
+                "verify_reason": "Skipped/Unavailable",
+            }
+
+        v_ok, v_reason = self.verify(tip, shadow)
+        return {
+            "ok": True,
+            "message": msg,
+            "tip": tip,
+            "shadow": shadow,
+            "verified": bool(v_ok),
+            "verify_reason": v_reason,
+        }

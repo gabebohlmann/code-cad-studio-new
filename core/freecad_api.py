@@ -27,3 +27,9 @@ class FreeCADAPI:
     def is_gui_up(self):
         # FreeCAD sets this flag when GUI is running
         return bool(getattr(FreeCAD, "GuiUp", False))
+    
+    def ensure_doc(self, name="Doc"):
+        if FreeCAD.ActiveDocument:
+            return FreeCAD.ActiveDocument
+        return FreeCAD.newDocument(name)
+
