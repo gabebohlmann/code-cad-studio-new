@@ -34,6 +34,7 @@ A FreeCAD workbench for bidirectional sync between FreeCAD and a Build123d code 
     So: keep selection generation in gui/, and keep selector execution (pure build123d text inserted into code) in core/."
   1. Possibly remove all FreeCAD.(...) or at least FreeCAD.Part as it is apparently error causing from within FreeCAD python env (use just Part or other)
   1. Figure out why initial recompute loads for along time and can crash entire program but subsequent part deletes and readds (assume it recomputes?) are snappy
+  1. Switch to 2 spaces tabs
   
 
 ## Build123d algebra mode vs. FreeCAD Part Workbench feature parity
