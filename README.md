@@ -35,6 +35,20 @@ A FreeCAD workbench for bidirectional sync between FreeCAD and a Build123d code 
   1. Possibly remove all FreeCAD.(...) or at least FreeCAD.Part as it is apparently error causing from within FreeCAD python env (use just Part or other)
   1. Figure out why initial recompute loads for along time and can crash entire program but subsequent part deletes and readds (assume it recomputes?) are snappy
   1. Switch to 2 spaces tabs
+  1. in core/engine.py
+      figure out if this is the right heuristic or if tip heuristics even matter. make a diagram of how and why tip matters
+        leaves = [c for c in candidates if c not in parents]
+        return leaves[-1] if leaves else None
+  1. Consider removing from Build123d import * in the frontend code
+  1. Standardize function comments and documentation
+  1. possible duplication of import should probably check if full_code includes import in parser.py 
+    exec("from build123d import *", local_env)
+    exec(full_code, local_env)
+  1. Make exec() in parser.py safer by making a .py file wrapper to validate build123d or other arbitrary code execution mitigation
+  1. Check that "baking" location in shadow.py makes the most sense. Doesn't matter as shadow but does it persist into export?
+  1. This code in shadow.py may need the not removed
+     # Optional display offset (keeps old side-by-side behavior)
+     if not hasattr(obj, "DisplayOffset"):
   
 
 ## Build123d algebra mode vs. FreeCAD Part Workbench feature parity
