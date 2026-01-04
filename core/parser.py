@@ -20,7 +20,9 @@ def parse_variables(code):
     """Extracts variable names and values from code string."""
     vars_found = []
     lines = code.split("\n")
-    pattern = re.compile(r"^([a-zA-Z_][a-zA-Z0-9_]*)\s*=\s*([-+]?[0-9]*\.?[0-9]+)$")
+    pattern = re.compile(
+        r"""^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)\s*(?:#.*)?$"""
+    )
     for idx, line in enumerate(lines):
         match = pattern.match(line.strip())
         if match:
@@ -41,7 +43,7 @@ def _extract_call(line: str, func_name: str):
     s = line[i + len(func_name) + 1 :]
     j = s.rfind(")")
     if j < 0:
-        return None
+        return None 
     return s[:j]
 
 
