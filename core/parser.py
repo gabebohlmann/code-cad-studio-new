@@ -496,5 +496,5 @@ def inject_code_to_freecad(full_code):
                 pass
 
         return True, "Synced"
-
+    
     return True, "No Changes"
