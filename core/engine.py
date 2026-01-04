@@ -12,8 +12,8 @@ class SyncEngine:
     """
     Headless-safe orchestration layer:
     - Finds "tip" object
-    - GUI->Code (transpile)
-    - Code->GUI (inject)
+    - GUI -> Code (transpile)
+    - Code -> GUI (inject)
     - Shadow update
     - Verification
     - Origin toggle (FreeCAD origin <-> build123d origin)

@@ -32,4 +32,3 @@ class FreeCADAPI:
         if FreeCAD.ActiveDocument:
             return FreeCAD.ActiveDocument
         return FreeCAD.newDocument(name)
-
