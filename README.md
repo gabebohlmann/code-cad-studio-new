@@ -1,7 +1,22 @@
 # code-cad-studio
 A FreeCAD workbench for bidirectional sync between FreeCAD and a Build123d code panel
 
+## How to run server
+  1. cd server
+  1. .\.venv\Scripts\Activate.ps1
+  1. python -m uvicorn server.app:app --reload --host 127.0.0.1 --port 8000
+
 ## TODO
+  1. Fix web ui 
+  1. Add strict type checking
+  1. Check docstring correctness with ruff and pydoc lint
+  1. Make server/app.py actually grab a real env var for FREECAD_CMD
+  1. Shouldn't these build123d helpers be isolated out from the dock.py?
+      _round3()
+      selector_for_vertex()
+      selector_for_edge()
+      ... 
+  1. Add strict typing (there was a settings somewhere in vs code for linting or something to enforce stricter typing)
   1. Figure out why Build123d based exporting isn't working and only BREP Tools will work
   1. Look into why FreeCAD (OCCT?) can't solve corner fillet geometry when you do a face and then columns of a cube. (columns and then face works because both are cylindrical fillets presumambly, whereas a face fillet does "spherical" fillets in corners)
   1. Decide what to do with sliders when a var is an order of magnitude larger (currently they all reset too the middle point and have individual scales)
@@ -47,8 +62,139 @@ A FreeCAD workbench for bidirectional sync between FreeCAD and a Build123d code 
   1. Make exec() in parser.py safer by making a .py file wrapper to validate build123d or other arbitrary code execution mitigation
   1. Check that "baking" location in shadow.py makes the most sense. Doesn't matter as shadow but does it persist into export?
   1. This code in shadow.py may need the not removed
-     # Optional display offset (keeps old side-by-side behavior)
+     \# Optional display offset (keeps old side-by-side behavior)
      if not hasattr(obj, "DisplayOffset"):
+  1. Figure out why ensure_shadow() and get_shadow_object() should both exist, they seem redundand or remove ensure_shadow() obj return
+  1. Why is this the origin in FC? in core/verifier.py
+    \# Clone and align shadow back to origin for comparison
+    s2_aligned = s2.copy()
+    s2_aligned.translate(FreeCAD.Base.Vector(-60, 0, 0))
+  1. What is the "CodeCAD" argument doingin engine.py?
+   obj.addProperty(
+                "App::PropertyBool",
+                "CodeCAD_UseB123dOrigin",
+                "CodeCAD",
+                "If true, prefer build123d default origin/alignment for generated code.",
+            )"
+  1. Investigate this ChatGPT function comment in core/engine.py
+      def _shape_bbox_center_local(self, obj):
+        """
+        IMPORTANT:
+        In FreeCAD, obj.Shape is typically in *local* coordinates; Placement is applied separately.
+        Therefore Shape.BoundBox.Center is already local for Part:: primitives.
+        """
+  1. Probably better to pass/return origin state as a string "b123d" or "fc" instead of a boolean of either one and hope user/coder remembers which one
+  in core/engine.py
+    return root, bool(root.CodeCAD_UseB123dOrigin)
+  1. Investigate this ChatGPT comment
+    def toggle_origin_for_tip(self, tip_obj):
+        """
+        Toggles alignment between FreeCAD default (Center of Mass) and build123d default (Origin).
+      * is the position in the viewer in the .fcstd or .step exports or is centering the viewer origin on the COM purely visual? a ChatGPT comment elsewhere implied that pos() was set outside of the core object class so that may affect how things are exported right? how do other CAD packages manage positional information in their file types and exports? would a .sldprt and a .step export from solidworks from the same file import into another program at the same position? 
+  1. Investigate this ChatGPT comment further.     
+      def _shape_bbox_center_local(self, obj):
+        """
+        Calculates the center of the object's bounding box in local coordinates.
+
+        In FreeCAD, `obj.Shape` is typically defined in local space relative to
+        `obj.Placement`. Therefore, `Shape.BoundBox.Center` gives us the 
+        geometric center relative to the object's origin (0,0,0).
+  1. Add more in code comments, will save this for a full reread for a release candidate when I understand the FC and b123d APIs better
+  1. Standardize function parameter names shape vs shp vs geo_shape etc.
+  1. Investigate _safe_center() in transpiler.py. how do points and vertexes return a center? is it for when the geo_shape is jsut that object?
+  1. Investigate face selectors in transpiler.py
+    if st == "Face":
+            try:
+                n = geo_shape.normalAt(0, 0)
+                if abs(n.z) > 0.99:
+                    return f"part.faces().sort_by(Axis.Z).{'last' if c.z > 0 else 'first'}"
+  1. What are edgelinks? core/transpiler.py
+    if hasattr(obj, "EdgeLinks") and isinstance(obj.EdgeLinks, tuple) and len(obj.EdgeLinks) > 1:
+  1. In transpiler.py this is kind of jank. Makes more sense when you look at what has to be done for sphere i guess tho.
+      def _is_default(v, d):
+              try:
+                  return abs(float(v) - float(d)) < 1e-9
+              except Exception:
+                  return False
+
+          is_full = _is_default(ang, 360.0)
+  1. Investigate in transpiler.py
+           if not _use_b123d_origin(obj):
+            c_local = _bbox_center_local(obj)
+            if c_local is not None:
+                cx, cy, cz = float(c_local.x), float(c_local.y), float(c_local.z)
+                if abs(cx) > 1e-9 or abs(cy) > 1e-9 or abs(cz) > 1e-9:
+                    lines.append(f"part = Pos({cx:.6f}, {cy:.6f}, {cz:.6f}) * part")
+  1. Investigate fillets in parser.py
+    elif obj.TypeId in ["Part::Fillet", "Part::Chamfer"]:
+        parent = None
+        if hasattr(obj, "Base"):
+            parent = obj.Base
+  1. Consider pulling FreeCAD imports out of every file except freecad_api.py
+  here is a ChatGPT chat on that. Read API ChatGPT chat header below
+  1. Code duplicated in api and shadow.py
+    def _gui_up() -> bool:
+    """True when FreeCAD is running with GUI (FreeCADGui loaded)."""
+    try:
+        return bool(getattr(FreeCAD, "GuiUp", False))
+    except Exception:
+        return False
+  1. Why are OCP imports in core/shadow.py in the code itself and not at the top? are they resource intensive so only called when neccesary
+  1. Possibly redundant from Build123d import * in shadow.py
+  1. Does uv mean something? in gui/dock.py
+      uv = face_shape.Surface.parameter(c)
+      n = face_shape.normalAt(uv[0], uv[1])
+  1. This > or < 1 method seems buggy in gui/dock.selector_for_face
+  1. what is super in ParameterWidget.__init__()? just a QT widget?
+  1. Figure out the mechanics of ParameterWidget.update_state() and (...).on_slide()
+  1. What does gui_to_code_suppressed(), self.panel.programmatic_update do in gui/dock.py?
+  1. slotChangedObject(), slotCreatedObject(), and slotDeletedObject() are strange in gui/dock.py there all basically wrappers for self.panel.trigger_gui_to_code_update(),  B123dSelectionObserver() class methods are similar as wrappers for self.panel.update_selector_from_current_selection()
+  1. in gui/dock.py this super call doesn't make sense to me 
+      class B123dDockWidget(QtGui.QDockWidget):
+        def __init__(self, parent=None):
+            super().__init__(parent)
+  1. How does this work in gui/dock.py
+      class B123dDockWidget(QtGui.QDockWidget):
+        def __init__(self, parent=None):
+        ...
+            # IMPORTANT: prevents GUI->Code overwrite right after code application
+            self._suppress_gui_to_code_until = 0.0
+      
+      and 
+
+            self.observer = B123dLiveSyncObserver(self)
+            FreeCAD.addDocumentObserver(self.observer)
+  1. what do pl and pc mean in B123dDockWidget.__init__()
+  l2.addWidget(QtGui.QLabel("Variables (Common Scale):"))
+            self.pl = QtGui.QVBoxLayout()
+            self.pl.setAlignment(QtCore.Qt.AlignTop)
+            pc = QtGui.QWidget()
+            pc.setLayout(self.pl)
+            l2.addWidget(pc)
+  1. Who delete later in dock.py?
+                # Clear tuner widgets
+                for name in list(self.param_widgets.keys()):
+                    try:
+                        self.param_widgets[name].deleteLater()
+  1. Add a reset_panel function to dock.py that clear_panel_no_part() will use so that the code is more seperated concerns
+  1. Test the 300 ms pause
+          def trigger_gui_to_code_update(self):
+            if self.gui_to_code_suppressed():
+                return
+            self.status.setText("Reading FreeCAD…")
+            self.status.setStyleSheet("background: #ddf; color: blue; padding: 5px;")
+            self.timer_gui_to_code.start(300)
+  1. Track how code var is generated in dock.py
+    code = self.engine.code_from_tip(tip)
+  1. .deleteLater() in dock.py how does it work
+  1. In dock.py why  *2 ?
+      this_limit = scale_limit if scale_limit else (val * 2.0 if val != 0 else 1.0)
+  1. How does dock.py update_slider() apply to current code? seems like it appends on update
+  1. How to find undocumented functions or variables in code programatticaly 
+  1. Possibly fix the strange way dock.py nests the entire class inside an if/else
+  1. Add mouseover (preselect) functionality in the 3d view for highlighting code blocks/lines in the code cad window dock.py.B123dSelectionObservers.setPreselection()
+  1. 
+
   
 
 ## Build123d algebra mode vs. FreeCAD Part Workbench feature parity
@@ -208,6 +354,48 @@ Best practice for safety + community alignment:
 That keeps you aligned with FreeCAD’s security posture while still making “code-cad” a first-class workflow.
 
 If you want, paste your current `inject_code_to_freecad()` and I’ll outline exactly how to add a **Safe Mode** path (AST whitelist, no `exec`) without breaking your current functionality.
+
+## API ChatGPT Chat
+    You are spot on. It is a bit arbitrary, but there is a subtle architectural distinction at play here: Data Types vs. Business Logic.
+
+The method vector() is in freecad_api.py because it is a Factory for a Primitive Data Type. It doesn't "do" anything to your project; it just gives you a value object.
+
+In contrast, the "geometry methods" in engine.py (like find_tip_object) are Application Logic. They define how your specific workbench functions.
+
+Here is the breakdown of why this separation exists (and where it is arguably imperfect):
+1) The vector() method is a "Safe Factory"
+
+If you look closely at the implementation in freecad_api.py:
+Python
+
+def vector(self, x=0.0, y=0.0, z=0.0):
+    return FreeCAD.Base.Vector(float(x), float(y), float(z))
+
+It performs Input Sanitization.
+
+    Native FreeCAD: FreeCAD.Base.Vector("10", "10", "10") will crash (TypeError) because the C++ bindings expect numbers, not strings.
+
+    Your API: api.vector("10", "10", "10") works perfectly because it casts to float first.
+
+Since your parser.py deals heavily with extracting strings from text files, having this "Safe Factory" in your lowest-level API prevents crashes from bad data types. It belongs in freecad_api.py because it is a generic utility, not specific to the logic of "Code-CAD".
+2) engine.py contains "Domain Logic"
+
+Methods like find_tip_object or toggle_origin_for_tip are not generic FreeCAD operations. They represent opinions specific to your application:
+
+    "The tip is the last object that isn't a Shadow." (Opinion)
+
+    "We should move the placement to match the bounding box center." (Opinion)
+
+If you put these in freecad_api.py, you would pollute your clean "Adapter Layer" with complex business rules.
+3) The Arbitrary Part (Critique)
+
+You are right that it is inconsistent because files like core/engine.py and core/parser.py import FreeCAD directly anyway.
+
+    Strict Architecture: If you were being 100% strict, engine.py would never import FreeCAD. It would call self.api.create_box(...) or self.api.get_objects().
+
+    Pragmatic Architecture: You (or the AI) likely decided that wrapping every single FreeCAD function (like doc.addObject, obj.Shape.Edges, obj.Placement) was too much work.
+
+Conclusion: freecad_api.py became a home for "Unsafe or Generic things" (logging, recomputing, type casting), while engine.py became the home for "The actual application." The vector() method sits in the API because it is a generic utility helper, essentially extending the FreeCAD capabilities to be safer for Python strings.
 
 [1]: https://wiki.freecad.org/Scripted_objects?utm_source=chatgpt.com "Scripted objects"
 [2]: https://forum.freecad.org/viewtopic.php?style=2&t=77953&utm_source=chatgpt.com "(1) Collaboration - best practice?"
