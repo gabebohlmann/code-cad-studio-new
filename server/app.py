@@ -14,13 +14,22 @@ from server.freecad_runner import JobStore, run_freecad_job, Job
 
 
 def norm(p: str) -> str:
+    """
+    Normalizes a file path to use forward slashes and absolute positioning.
+
+    Args:
+        p (str): Input path.
+
+    Returns:
+        str: Normalized absolute path.
+    """
     return os.path.abspath(p).replace("\\", "/")
 
 
 # ---- config (portable to remote later via env vars)
 FREECAD_CMD = os.environ.get(
     "FREECAD_CMD",
-    r"C:\Program Files\FreeCAD 1.0\bin\FreeCADCmd.exe",
+    r"C:\Program Files\FreeCAD 1.2\bin\FreeCADCmd.exe",
 )
 
 # server/ is inside mod_root/server; web/ is mod_root/web; cli/run.py is mod_root/cli/run.py
@@ -33,12 +42,26 @@ jobs: Dict[str, Job] = {}
 
 
 class RenderRequest(BaseModel):
+    """
+    Schema for a job submission request.
+
+    Attributes:
+        code (str): The Python code to execute.
+        mesh_quality (str): Quality of the output mesh ('preview' or 'final'). Defaults to 'preview'.
+        verbose (bool): If True, captures and returns full logs. Defaults to True.
+    """
     code: str
     mesh_quality: str = "preview"  # preview|final
     verbose: bool = True
 
 
 class RenderResponse(BaseModel):
+    """
+    Schema for a job creation response.
+
+    Attributes:
+        job_id (str): The unique identifier for the created job.
+    """
     job_id: str
 
 
@@ -56,6 +79,16 @@ app.add_middleware(
 
 
 def _run_in_thread(job_id: str, req: RenderRequest):
+    """
+    Internal worker function to execute the FreeCAD job in a separate thread.
+
+    Calls the synchronous `run_freecad_job` and updates the global `jobs` dictionary
+    with the result.
+
+    Args:
+        job_id (str): The ID of the job to update.
+        req (RenderRequest): The job parameters.
+    """
     result = run_freecad_job(
         freecad_cmd=FREECAD_CMD,
         run_py=RUN_PY,
@@ -77,6 +110,15 @@ if os.path.isdir(WEB_DIR):
 
 @app.get("/")
 def root():
+    """
+    Serves the main single-page application entry point.
+
+    Returns:
+        FileResponse: The content of `web/index.html`.
+
+    Raises:
+        HTTPException: 404 if index.html is missing.
+    """
     index = os.path.join(WEB_DIR, "index.html")
     if not os.path.exists(index):
         raise HTTPException(status_code=404, detail="web/index.html not found")
@@ -85,6 +127,12 @@ def root():
 
 @app.get("/api/v1/health")
 def health():
+    """
+    System health check endpoint.
+
+    Returns:
+        dict: Configuration paths and status to verify server setup.
+    """
     return {
         "ok": True,
         "freecad_cmd": norm(FREECAD_CMD),
@@ -95,6 +143,18 @@ def health():
 
 @app.post("/api/v1/jobs", response_model=RenderResponse)
 def create_job(req: RenderRequest):
+    """
+    Submits a new rendering job to the queue.
+
+    Spawns a background thread to process the FreeCAD execution without blocking
+    the web server.
+
+    Args:
+        req (RenderRequest): The job details (code, options).
+
+    Returns:
+        RenderResponse: Object containing the new `job_id`.
+    """
     j = store.create()
     jobs[j.id] = j
 
@@ -106,6 +166,24 @@ def create_job(req: RenderRequest):
 
 @app.get("/api/v1/jobs/{job_id}")
 def job_status(job_id: str) -> Dict[str, Any]:
+    """
+    Polls the status of a specific job.
+
+    Args:
+        job_id (str): The ID of the job to check.
+
+    Returns:
+        Dict[str, Any]: Status object containing:
+            - id (str): Job ID.
+            - status (str): 'queued', 'running', 'done', or 'error'.
+            - error (str | None): Error message if failed.
+            - logs (list[str]): The last 300 lines of logs.
+            - mesh_available (bool): True if STL export succeeded.
+            - shapes_available (bool): True if JSON export succeeded.
+
+    Raises:
+        HTTPException: 404 if the job ID does not exist.
+    """
     j = jobs.get(job_id)
     if not j:
         raise HTTPException(status_code=404, detail="job not found")
@@ -123,6 +201,20 @@ def job_status(job_id: str) -> Dict[str, Any]:
 
 @app.get("/api/v1/jobs/{job_id}/mesh")
 def job_mesh(job_id: str):
+    """
+    Retrieves the generated STL mesh for a completed job.
+
+    Args:
+        job_id (str): The job ID.
+
+    Returns:
+        FileResponse: The .stl file download.
+
+    Raises:
+        HTTPException:
+            - 404 if job or mesh file not found.
+            - 409 if job is not yet finished.
+    """
     j = jobs.get(job_id)
     if not j:
         raise HTTPException(status_code=404, detail="job not found")
@@ -135,6 +227,20 @@ def job_mesh(job_id: str):
 
 @app.get("/api/v1/jobs/{job_id}/shapes")
 def job_shapes(job_id: str):
+    """
+    Retrieves the generated JSON geometry for three-cad-viewer.
+
+    Args:
+        job_id (str): The job ID.
+
+    Returns:
+        FileResponse: The .json file download.
+
+    Raises:
+        HTTPException:
+            - 404 if job or shapes file not found.
+            - 409 if job is not yet finished.
+    """
     j = jobs.get(job_id)
     if not j:
         raise HTTPException(status_code=404, detail="job not found")

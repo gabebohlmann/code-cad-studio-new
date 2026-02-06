@@ -9,11 +9,33 @@ from typing import Optional, List, Dict
 
 
 def norm(p: str) -> str:
+    """
+    Normalizes a file path to use forward slashes and absolute positioning.
+
+    Args:
+        p (str): Input path.
+
+    Returns:
+        str: Normalized absolute path.
+    """
     return os.path.abspath(p).replace("\\", "/")
 
 
 @dataclass
 class Job:
+    """
+    Data container representing a single rendering job state.
+
+    Attributes:
+        id (str): Unique UUID string for the job.
+        status (str): Current state ('queued', 'running', 'done', 'error').
+        logs (List[str]): Captured stdout/stderr lines from the FreeCAD subprocess.
+        error (str | None): Error message if the job failed.
+        mesh_path (str | None): Absolute path to the generated STL file.
+        shapes_path (str | None): Absolute path to the generated JSON geometry file.
+        code_path (str | None): Absolute path to the input Python script file.
+        work_dir (str | None): Absolute path to the temporary directory holding artifacts.
+    """
     id: str
     status: str = "queued"  # queued|running|done|error
     logs: List[str] = field(default_factory=list)
@@ -25,16 +47,44 @@ class Job:
 
 
 class JobStore:
+    """
+    Simple in-memory database for tracking rendering jobs.
+
+    Attributes:
+        jobs (Dict[str, Job]): Dictionary mapping job IDs to Job objects.
+    """
     def __init__(self):
+        """Initializes an empty job store."""
         self.jobs: Dict[str, Job] = {}
 
+    """
+    Creates a new Job with a unique ID and registers it in the store.
+
+    Returns:
+        Job: The newly created job instance (status='queued').
+    """
     def create(self) -> Job:
+        """
+        Creates a new Job with a unique ID and registers it in the store.
+
+        Returns:
+            Job: The newly created job instance (status='queued').
+        """
         jid = str(uuid.uuid4())
         j = Job(id=jid)
         self.jobs[jid] = j
         return j
 
     def get(self, jid: str) -> Optional[Job]:
+        """
+        Retrieves a job by its ID.
+
+        Args:
+            jid (str): The unique job identifier.
+
+        Returns:
+            Job | None: The job object if found, else None.
+        """
         return self.jobs.get(jid)
 
 
@@ -47,10 +97,29 @@ def run_freecad_job(
     verbose: bool = True,
 ) -> Job:
     """
-    Synchronous worker.
+    Synchronously executes a FreeCAD rendering job in a subprocess.
 
-    IMPORTANT: Must use "Option A" pass style:
-      FreeCADCmd.exe <run.py> --pass "<all script args in one string>"
+    This function:
+    1. Creates a temporary working directory.
+    2. Writes the user's code to `input.py`.
+    3. Launches `FreeCADCmd.exe` with `cli/run.py` to process the file.
+    4. Captures stdout/stderr into the job logs.
+    5. Verifies the output artifacts (JSON/STL) exist.
+
+    Note:
+        Uses the "Option A" pass style for FreeCAD arguments:
+        `FreeCADCmd.exe <run.py> --pass "<all script args in one string>"`
+        This avoids argument parsing issues inherent to FreeCAD's CLI.
+
+    Args:
+        freecad_cmd (str): Path to the `FreeCADCmd` executable.
+        run_py (str): Path to the `cli/run.py` script.
+        code_text (str): The Python source code to render.
+        mesh_quality (str, optional): tessellation quality ('preview' or 'final'). Defaults to "preview".
+        verbose (bool, optional): If True, passes the `--verbose` flag to the runner. Defaults to True.
+
+    Returns:
+        Job: A completed Job object with status set to 'done' or 'error'.
     """
     job = Job(id=str(uuid.uuid4()), status="running")
 

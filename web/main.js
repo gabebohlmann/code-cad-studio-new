@@ -1,9 +1,10 @@
 // web/main.js
 
-// three-cad-viewer based web UI (no raw three.js)
-//
-// Requires server endpoint:
-//   GET /api/v1/jobs/{job_id}/shapes  -> returns Shapes JSON (protocol v3)
+/**
+ * @fileoverview Frontend logic for Code-CAD Studio.
+ * * Integrates the 'three-cad-viewer' library to display 3D geometry generated
+ * by the FreeCAD backend. It manages the Job submission lifecycle (Submit -> Poll -> Render).
+ */
 
 import {
   Viewer,
@@ -12,6 +13,7 @@ import {
 
 const API = "/api/v1";
 
+// UI Element References
 const elViewer = document.getElementById("viewer");
 const elCode = document.getElementById("code");
 const elLog = document.getElementById("log");
@@ -20,21 +22,35 @@ const btnPreview = document.getElementById("renderPreview");
 const btnFinal = document.getElementById("renderFinal");
 const btnClearLog = document.getElementById("clearLog");
 
+/**
+ * Appends a line of text to the on-screen log console.
+ * Automatically scrolls to the bottom.
+ * * @param {string} line - The message to append.
+ */
 function log(line) {
   elLog.textContent += line + "\n";
   elLog.scrollTop = elLog.scrollHeight;
 }
 
+/**
+ * Updates the small status badge in the sidebar.
+ * * @param {string} s - The status text (e.g., "running...", "done").
+ */
 function setStatus(s) {
   elStatus.textContent = s;
 }
 
+/**
+ * Toggles the disabled state of the render buttons.
+ * Used to prevent double-submissions while a job is running.
+ * * @param {boolean} b - If true, buttons are disabled.
+ */
 function setBusy(b) {
   btnPreview.disabled = b;
   btnFinal.disabled = b;
 }
 
-// Default code
+// Default code example
 elCode.value = `from build123d import *
 
 L = 5.0
@@ -51,14 +67,19 @@ part = Box(L, W, H)
 let viewer = null;
 let display = null;
 
-// Keep these as module-level so render() can pass them every time.
-// (This matches the library's own "Skeleton" example.) :contentReference[oaicite:1]{index=1}
+// Configuration objects for the viewer.
+// Kept at module level so they can be reused during re-renders.
 let displayOptions = null;
 let renderOptions = null;
 let viewerOptions = null;
 
+
+/**
+ * Callback triggered by the 3D Viewer when the scene changes (e.g., selection).
+ * * @param {object} change - The event data from the viewer.
+ */
 function notifyChange(change) {
-  // You can later forward pick/selection events back to FreeCAD.
+  // later on pick/selection events back to FreeCAD.
   try {
     const pick = change?.lastPick?.new;
     if (pick) console.log("picked:", pick);
@@ -67,6 +88,10 @@ function notifyChange(change) {
   }
 }
 
+/**
+ * Initializes the configuration objects for the 3D viewer.
+ * Calculates dimensions based on the DOM element size.
+ */
 function buildOptions() {
   const w = Math.max(200, elViewer.clientWidth || 800);
   const h = Math.max(200, elViewer.clientHeight || 600);
@@ -84,7 +109,7 @@ function buildOptions() {
     },
   };
 
-  // Reasonable defaults (similar to README skeleton) :contentReference[oaicite:2]{index=2}
+  // Rendering aesthetics (Material properties)
   renderOptions = {
     ambientIntensity: 1.0,
     directIntensity: 1.1,
@@ -95,27 +120,35 @@ function buildOptions() {
     normalLen: 0,
   };
 
+  // Camera settings
   viewerOptions = {
     target: [0, 0, 0],
     up: "Z",
   };
 }
 
+/**
+ * Instantiates the three-cad-viewer Display and Viewer objects.
+ * Clears the DOM element before creation to prevent duplicates on resize.
+ * * @returns {Viewer} The initialized Viewer instance.
+ */
 function createCadViewer() {
   buildOptions();
 
   // wipe old DOM contents
   elViewer.innerHTML = "";
 
-  // create display + viewer exactly as the upstream skeleton does :contentReference[oaicite:3]{index=3}
+  // create display + viewer exactly as the upstream skeleton does
   display = new Display(elViewer, displayOptions);
   viewer = new Viewer(display, viewerOptions, notifyChange);
 
   return viewer;
 }
 
+// Initial setup
 createCadViewer();
 
+// Handle Window Resize with Debounce
 let _resizeTimer = null;
 window.addEventListener("resize", () => {
   // Debounce to avoid thrashing while resizing.
@@ -133,6 +166,13 @@ window.addEventListener("resize", () => {
 // --------------------
 // API calls
 // --------------------
+
+/**
+ * Submits a new rendering job to the backend.
+ * * @param {string} code - The Python source code.
+ * @param {string} mesh_quality - 'preview' or 'final'.
+ * @returns {Promise<{job_id: string}>} The created job ID.
+ */
 async function createJob(code, mesh_quality) {
   const res = await fetch(`${API}/jobs`, {
     method: "POST",
@@ -147,6 +187,11 @@ async function createJob(code, mesh_quality) {
   return await res.json(); // { job_id }
 }
 
+/**
+ * Polls the status of a specific job.
+ * * @param {string} jobId - The Job ID to check.
+ * @returns {Promise<object>} The job status object.
+ */
 async function getJob(jobId) {
   const res = await fetch(`${API}/jobs/${jobId}`);
   if (!res.ok) {
@@ -156,6 +201,11 @@ async function getJob(jobId) {
   return await res.json();
 }
 
+/**
+ * Fetches the generated JSON geometry for a completed job.
+ * * @param {string} jobId - The Job ID.
+ * @returns {Promise<object>} The three-cad-viewer JSON protocol object.
+ */
 async function loadShapes(jobId) {
   const res = await fetch(`${API}/jobs/${jobId}/shapes`);
   if (!res.ok) {
@@ -165,6 +215,10 @@ async function loadShapes(jobId) {
   return await res.json();
 }
 
+/**
+ * Renders the provided shapes in the 3D viewer.
+ * * @param {object} shapes - The JSON geometry data.
+ */
 function showShapes(shapes) {
   if (!viewer) createCadViewer();
 
@@ -174,13 +228,22 @@ function showShapes(shapes) {
     // ignore
   }
 
-  // IMPORTANT: pass renderOptions + viewerOptions like the upstream skeleton :contentReference[oaicite:4]{index=4}
+  // IMPORTANT: pass renderOptions + viewerOptions like the upstream skeleton 
   viewer.render(shapes, renderOptions, viewerOptions);
 }
 
 // --------------------
 // Render loop (job submit + poll + show)
 // --------------------
+
+/**
+ * Main orchestration function.
+ * 1. Submits the code to the server.
+ * 2. Polls the job status until 'done' or 'error'.
+ * 3. Fetches the result.
+ * 4. Updates the 3D viewer.
+ * * @param {string} mesh_quality - 'preview' or 'final'.
+ */
 async function render(mesh_quality) {
   setBusy(true);
   setStatus("submitting…");

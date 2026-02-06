@@ -10,31 +10,55 @@ from core.verifier import compare_shapes
 
 class SyncEngine:
     """
-    Headless-safe orchestration layer:
-    - Finds "tip" object
-    - GUI -> Code (transpile)
-    - Code -> GUI (inject)
-    - Shadow update
-    - Verification
-    - Origin toggle (FreeCAD origin <-> build123d origin)
+    The headless-safe orchestration layer that acts as the central controller for 
+    the Code-CAD Studio workbench.
+    
+    Acts as a facade for the Parser, Transpiler, and Shadow modules, managing 
+    the bi-directional synchronization between the FreeCAD document state 
+    and the build123d Python code.
+        - Finds "tip" object
+        - GUI -> Code (transpile)
+        - Code -> GUI (inject)
+        - Shadow update
+        - Verification
+        - Origin toggle (FreeCAD origin <-> build123d origin)
+
+    Attributes:
+        api (FreeCADAPI): Adapter for FreeCAD operations.
     """
 
     def __init__(self, api):
         self.api = api
 
-    # -------------------------------------------------------------------------
-    # Convenience: UI helpers that are still non-GUI (so GUI doesn't import core/*)
-    # -------------------------------------------------------------------------
     def parse_variables(self, code: str):
+        """
+        Extracts variable definitions from the provided code for the UI Tuner.
+
+        Args:
+            code (str): The raw Python code string.
+
+        Returns:
+            list[dict]: A list of dicts, e.g., [{'name': 'L', 'value': 10.0}, ...].
+        """
         try:
             return parse_variables(code)
         except Exception:
             return []
 
-    # -------------------------------------------------------------------------
-    # Tip discovery
-    # -------------------------------------------------------------------------
     def find_tip_object(self, doc=None):
+        """
+        Locates the 'Tip' (terminal) object in the document dependency graph.
+
+        The 'Tip' is essentially the final result of the modeling operations.
+        It heuristicly filters for 'Part::' objects that are not parents of 
+        any other object.
+
+        Args:
+            doc (App.Document, optional): The document to search. Defaults to active doc.
+
+        Returns:
+            object | None: The FreeCAD DocumentObject representing the tip, or None.
+        """
         doc = doc or self.api.active_doc()
         if not doc:
             return None
@@ -64,29 +88,53 @@ class SyncEngine:
         leaves = [c for c in candidates if c not in parents]
         return leaves[-1] if leaves else None
 
-    # -------------------------------------------------------------------------
-    # GUI -> Code
-    # -------------------------------------------------------------------------
     def code_from_tip(self, tip_obj):
+        """
+        Generates build123d Python code representing the given FreeCAD object.
+
+        Args:
+            tip_obj (object): The FreeCAD object to transpile.
+
+        Returns:
+            str: The generated Python code including imports.
+        """
         if not tip_obj:
             return ""
         return "from build123d import *\n\n" + transpile_object(tip_obj)
 
-    # -------------------------------------------------------------------------
-    # Code -> GUI (apply to FreeCAD params) + Shadow update
-    # -------------------------------------------------------------------------
     def apply_code_to_freecad(self, code: str):
         """
-        Apply code to FreeCAD primitives/params (parser.inject_code_to_freecad).
-        Returns (success, message).
+        Parses the provided code and injects parameter values into existing FreeCAD objects.
+
+        This performs the Code -> GUI synchronization direction.
+
+        Args:
+            code (str): The Python source code.
+
+        Returns:
+            tuple[bool, str]: (Success boolean, Status message).
         """
         return inject_code_to_freecad(code)
 
     def ensure_shadow(self):
-        """Ensure the shadow object exists (headless-safe)."""
+        """
+        Ensures the 'Build123d_Shadow' object exists in the document.
+
+        Returns:
+            object: The shadow object.
+        """
         return ensure_shadow_object()
 
     def get_shadow_object(self, doc=None):
+        """
+        Retrieves the shadow object if it exists.
+
+        Args:
+            doc (App.Document, optional): The document to check.
+
+        Returns:
+            object | None: The shadow object or None.
+        """
         doc = doc or self.api.active_doc()
         if not doc:
             return None
@@ -97,7 +145,15 @@ class SyncEngine:
 
     def update_shadow_code(self, code: str):
         """
-        Update the shadow object's Code property.
+        Updates the 'Code' property of the shadow object.
+        
+        This triggers the shadow's internal `execute()` method on recompute.
+
+        Args:
+            code (str): The new Python code.
+
+        Returns:
+            object | None: The updated shadow object.
         """
         shadow = ensure_shadow_object()
         if shadow:
@@ -110,8 +166,13 @@ class SyncEngine:
 
     def remove_shadow(self, doc=None):
         """
-        Remove the shadow object if present.
-        Headless-safe: no ViewObject usage.
+        Removes the shadow object from the document.
+
+        Args:
+            doc (App.Document, optional): The document to modify.
+
+        Returns:
+            bool: True if removed or not present, False if error.
         """
         doc = doc or self.api.active_doc()
         if not doc:
@@ -127,17 +188,29 @@ class SyncEngine:
         except Exception:
             return False
 
-    # -------------------------------------------------------------------------
-    # Verification
-    # -------------------------------------------------------------------------
     def verify(self, tip_obj, shadow_obj):
+        """
+        Compares the FreeCAD object (tip) against the Shadow object.
+
+        Args:
+            tip_obj (object): The native FreeCAD object.
+            shadow_obj (object): The Code-generated shadow object.
+
+        Returns:
+            tuple[bool, str]: (True if match, Reason string).
+        """
         return compare_shapes(tip_obj, shadow_obj)
 
-    # -------------------------------------------------------------------------
-    # Origin toggle
-    # -------------------------------------------------------------------------
     def _ensure_origin_props(self, obj):
-        """Add per-object props if missing."""
+        """
+        Adds the necessary CodeCAD properties to an object if they are missing.
+
+        Injects 'CodeCAD_UseB123dOrigin' (Bool) and 'CodeCAD_OriginDelta' (Vector)
+        into the FreeCAD object to track its alignment state.
+
+        Args:
+            obj (App.DocumentObject): The FreeCAD object to patch.
+        """
         if not hasattr(obj, "CodeCAD_UseB123dOrigin"):
             obj.addProperty(
                 "App::PropertyBool",
@@ -158,9 +231,17 @@ class SyncEngine:
 
     def _shape_bbox_center_local(self, obj):
         """
-        IMPORTANT:
-        In FreeCAD, obj.Shape is typically in *local* coordinates; Placement is applied separately.
-        Therefore Shape.BoundBox.Center is already local for Part:: primitives.
+        Calculates the center of the object's bounding box in local coordinates.
+
+        In FreeCAD, `obj.Shape` is typically defined in local space relative to
+        `obj.Placement`. Therefore, `Shape.BoundBox.Center` gives us the 
+        geometric center relative to the object's origin (0,0,0).
+
+        Args:
+            obj (App.DocumentObject): The object to inspect.
+
+        Returns:
+            FreeCAD.Base.Vector | None: The center vector, or None if the shape is invalid.
         """
         shp = getattr(obj, "Shape", None)
         if not shp:
@@ -175,7 +256,17 @@ class SyncEngine:
 
     def _find_root_object_for_origin(self, tip):
         """
-        For origin changes, prefer applying to the *base primitive* if tip is a modifier.
+        Walks up the dependency chain to find the 'Base' primitive.
+
+        When applying origin toggles, we cannot move a modifier (like a Fillet)
+        directly; we must move the underlying primitive (like the Box) that 
+        defines the coordinate space.
+
+        Args:
+            tip (App.DocumentObject): The currently selected tip object.
+
+        Returns:
+            App.DocumentObject | None: The ancestor primitive (e.g., Box) or the tip itself.
         """
         obj = tip
         seen = set()
@@ -197,7 +288,13 @@ class SyncEngine:
 
     def get_origin_state(self, tip_obj):
         """
-        Return (root_obj, using_b123d_origin_bool) for current tip, or (None, False).
+        Determines the current origin mode of the tip object's root.
+
+        Args:
+            tip_obj (object): The object to inspect.
+
+        Returns:
+            tuple[object | None, bool]: (The root object, True if using build123d origin).
         """
         if not tip_obj:
             return None, False
@@ -212,10 +309,16 @@ class SyncEngine:
 
     def toggle_origin_for_tip(self, tip_obj):
         """
-        Toggle between:
-          - FreeCAD origin (default): CodeCAD_UseB123dOrigin = False
-          - build123d origin: CodeCAD_UseB123dOrigin = True and Placement shifted by bbox-center
-        Returns (ok: bool, message: str, using_b123d_origin: bool)
+        Toggles alignment between FreeCAD default (Center of Mass) and build123d default (Origin).
+
+        Moves the object's Placement to visually maintain position while changing 
+        the internal origin logic.
+
+        Args:
+            tip_obj (object): The object to toggle.
+
+        Returns:
+            tuple[bool, str, bool]: (Success, Message, New State is Build123d?).
         """
         if not tip_obj:
             return False, "No Part", False
@@ -228,7 +331,7 @@ class SyncEngine:
 
         using = bool(root.CodeCAD_UseB123dOrigin)
 
-        # ---- If currently using build123d origin -> restore FreeCAD origin
+        # If currently using build123d origin -> restore FreeCAD origin
         if using:
             delta_world = getattr(root, "CodeCAD_OriginDelta", FreeCAD.Base.Vector(0, 0, 0))
             try:
@@ -240,7 +343,7 @@ class SyncEngine:
             except Exception:
                 return False, "Failed to restore origin", True
 
-        # ---- Otherwise enable build123d origin
+        # Otherwise enable build123d origin
         c_local = self._shape_bbox_center_local(root)
         if c_local is None:
             return False, "Origin toggle failed (no bbox)", False
@@ -263,8 +366,21 @@ class SyncEngine:
 
     def apply_pipeline(self, code: str, *, make_shadow: bool = True, verify: bool = True):
         """
-        Headless-safe "one call" pipeline.
-        Returns dict with fields you can show in GUI or return from server.
+        Executes the full Code -> GUI synchronization pipeline.
+
+        Sequence:
+        1. Inject code params into FreeCAD objects.
+        2. Update Shadow object code.
+        3. Recompute document.
+        4. Verify geometry match.
+
+        Args:
+            code (str): The Python code to process.
+            make_shadow (bool, optional): Whether to update the shadow. Defaults to True.
+            verify (bool, optional): Whether to run geometric verification. Defaults to True.
+
+        Returns:
+            dict: Result dictionary containing keys: 'ok', 'message', 'tip', 'shadow', 'verified', 'verify_reason'.
         """
         ok, msg = self.apply_code_to_freecad(code)
 

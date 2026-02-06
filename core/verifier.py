@@ -3,6 +3,18 @@
 import FreeCAD
 
 def compare_shapes(fc_obj, shadow_obj):
+    """
+    Compares the geometry of a FreeCAD object and a Shadow object.
+
+    Checks vertex counts, edge counts, volume, and center of mass.
+
+    Args:
+        fc_obj (object): The native FreeCAD object.
+        shadow_obj (object): The generated shadow object.
+
+    Returns:
+        tuple[bool, str]: (True if match, "Reason" string).
+    """
     if not fc_obj or not shadow_obj: return False, "Missing Objects"
     if not hasattr(fc_obj, "Shape") or not hasattr(shadow_obj, "Shape"): return False, "No Shape Data"
 

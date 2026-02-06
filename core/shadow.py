@@ -7,7 +7,12 @@ import os
 
 
 def _gui_up() -> bool:
-    """True when FreeCAD is running with GUI (FreeCADGui loaded)."""
+    """
+    Checks if FreeCAD is currently running with the GUI subsystem loaded.
+
+    Returns:
+        bool: True if `FreeCAD.GuiUp` is set, False if running in headless/console mode.
+    """
     try:
         return bool(getattr(FreeCAD, "GuiUp", False))
     except Exception:
@@ -16,8 +21,16 @@ def _gui_up() -> bool:
 
 def _get_location_obj(bobj):
     """
-    Try to extract a build123d Location-like object from common attribute names.
-    build123d has historically used .location and also introduced .global_location.
+    Extracts the location object from a build123d entity.
+
+    Build123d has historically changed how it exposes location (using `.location`
+    vs `.global_location`). This helper tries standard attributes to find it.
+
+    Args:
+        bobj (object): The build123d object (Solid, Sketch, etc.).
+
+    Returns:
+        object | None: The underlying Location object if found, else None.
     """
     loc = None
     if hasattr(bobj, "global_location"):
@@ -35,11 +48,15 @@ def _get_location_obj(bobj):
 
 def _bake_location_into_wrapped(bobj):
     """
-    Return a TopoDS_Shape with location baked into geometry so BREP export preserves transforms.
+    Bakes the location of a build123d object into its underlying TopoDS_Shape.
 
-    Why: build123d exporters often write `obj.wrapped` which may not include `obj.location`
-    transforms in a baked way. This makes translation/rotation via Pos/Rot appear to do nothing
-    in your shadow.
+    Crucial for export, as some formats ignore top-level location wrappers.
+
+    Args:
+        bobj (build123d.Topology): The build123d object.
+
+    Returns:
+        TopoDS_Shape: The OCCT shape with transforms applied to vertices.
     """
     if not hasattr(bobj, "wrapped"):
         return None
@@ -78,12 +95,25 @@ def _bake_location_into_wrapped(bobj):
 
 def save_any_shape(obj, path):
     """
-    Save build123d objects to BREP, preserving transforms (Pos/Rot) by baking location.
+    Exports a build123d object to a BREP file, preserving position/rotation.
 
-    Supports:
-      - obj.part / obj.sketch wrapping
-      - obj.wrapped (TopoDS_Shape)
-      - obj.export_brep as fallback, but we prefer our own writer so we don't lose location
+    Standard build123d exporters often export the underlying geometry (`.wrapped`)
+    without applying the object's local transformation (`.location`). This function
+    "bakes" that location into the vertex coordinates before saving, ensuring
+    the Shadow appears in the correct place in 3D space.
+
+    Strategies (in order):
+    1. Unwrap containers (`.part`, `.sketch`).
+    2. Bake location and write via OCP `BRepTools`.
+    3. Fallback to object's native `.export_brep()`.
+    4. Fallback to writing raw `.wrapped` geometry.
+
+    Args:
+        obj (object): The build123d object to export.
+        path (str): The destination file path.
+
+    Returns:
+        bool: True if export succeeded, False otherwise.
     """
     # Unwrap common build123d containers
     if hasattr(obj, "part"):
@@ -122,7 +152,22 @@ def save_any_shape(obj, path):
 
 
 class Build123dShadow:
+    """
+    The Proxy class for the 'Build123d_Shadow' FreeCAD object.
+    
+    Executes Python code and visualizes the result.
+
+    Attributes:
+        obj (App.FeaturePython): The associated FreeCAD object.
+    """
+
     def __init__(self, obj):
+        """
+        Initializes the shadow proxy and adds required properties.
+
+        Args:
+            obj (App.FeaturePython): The FreeCAD object instance.
+        """
         if not hasattr(obj, "Code"):
             obj.addProperty("App::PropertyString", "Code", "Build123d", "Generated Code")
 
@@ -139,7 +184,15 @@ class Build123dShadow:
         obj.Proxy = self
 
     def execute(self, obj):
-        # Silent Syntax Check
+        """
+        Executed during document recompute.
+
+        Compiles and runs the code in `obj.Code`, then updates `obj.Shape`
+        with the result.
+
+        Args:
+            obj (App.FeaturePython): The FreeCAD object instance.
+        """
         try:
             compile(obj.Code, "<string>", "exec")
         except SyntaxError:
@@ -189,26 +242,49 @@ class Build123dShadow:
 
 class Build123dViewProvider:
     """
-    GUI-only view provider. Must not be required in headless (FreeCADCmd).
+    The ViewProvider for the shadow object (GUI only).
+
+    Manages the visual appearance (green transparency).
     """
+
     def __init__(self, vobj):
+        """
+        Initializes the ViewProvider proxy.
+
+        Args:
+            vobj (App.ViewObject): The FreeCAD ViewObject to attach to.
+        """
         vobj.Proxy = self
 
     def getIcon(self):
+        """Returns the path to the icon resource."""
         return ":/icons/Part_Feature.svg"
 
     def attach(self, vobj):
+        """Attaches the provider to the ViewObject."""
         self.ViewObject = vobj
 
     def updateData(self, fp, prop):
+        """
+        Handles property updates for the view provider.
+
+        Required by the FreeCAD ViewProvider interface, even if empty.
+
+        Args:
+            fp (App.FeaturePython): The feature object.
+            prop (str): The name of the property that changed.
+        """
         pass
 
 
 def ensure_shadow_object():
     """
-    Headless-safe:
-      - Creates the App object always
-      - Only touches ViewObject / ViewProvider when GUI is up and ViewObject exists
+    Creates or retrieves the shadow object in the active document.
+    
+    Safe for headless execution (checks for GUI before accessing ViewObject).
+
+    Returns:
+        object | None: The shadow object.
     """
     doc = FreeCAD.ActiveDocument
     if not doc:

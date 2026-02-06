@@ -4,6 +4,15 @@ import FreeCAD
 
 
 def fingerprint(edge):
+    """
+    Creates a unique signature for an edge based on length and midpoint.
+
+    Args:
+        edge (TopoDS_Edge): The edge to fingerprint.
+
+    Returns:
+        tuple | None: (Length, mid_x, mid_y, mid_z) or None on error.
+    """
     try:
         mid = edge.valueAt(edge.Length / 2.0)
         return (round(edge.Length, 4), round(mid.x, 3), round(mid.y, 3), round(mid.z, 3))
@@ -12,6 +21,22 @@ def fingerprint(edge):
 
 
 def _safe_center(geo_shape):
+    """
+    Robustly attempts to find a center point for a generic topological shape.
+
+    Different FreeCAD shapes (Vertex, Edge, Face, Solid) expose their position 
+    or center of mass via different attributes. This function tries them in order:
+    1. `.Point` (Vertex)
+    2. `.CenterOfMass` (Edge, Face, Solid)
+    3. First Vertex's Point (Fallback)
+    4. Bounding Box Center (Fallback)
+
+    Args:
+        geo_shape (TopoDS_Shape): The FreeCAD geometry object to inspect.
+
+    Returns:
+        FreeCAD.Base.Vector | None: The center vector, or None if undetermined.
+    """
     if hasattr(geo_shape, "Point"):
         try:
             return geo_shape.Point
@@ -41,6 +66,26 @@ def _safe_center(geo_shape):
 
 
 def solve_selector(geo_shape):
+    """
+    Generates a build123d selector string for a specific sub-shape.
+
+    Analyzes the shape's geometric properties (center, normal) to generate 
+    stable selection code.
+
+    Logic:
+    - **Vertices/Edges:** Selects the nearest entity to the shape's center 
+      (e.g., `part.edges().sort_by_distance((x,y,z)).first`).
+    - **Planar Faces:** If aligned with X/Y/Z axes, uses `sort_by(Axis.X)` 
+      with `.first` or `.last` based on position.
+    - **Curved/Angled Faces:** Fallback to `sort_by_distance`.
+
+    Args:
+        geo_shape (TopoDS_Shape): The sub-shape (Face, Edge, Vertex) to target.
+
+    Returns:
+        str | None: The Python code snippet (e.g., `"part.faces().sort_by(Axis.Z).last"`),
+        or None if the shape is complex/compound.
+    """
     try:
         if not geo_shape:
             return None
@@ -81,6 +126,17 @@ def solve_selector(geo_shape):
 
 
 def generate_smart_selector_code(selected_geoms, parent_obj):
+    """
+    Generates build123d selector code (e.g., `part.faces().sort_by(...)`) 
+    for a given set of selected sub-shapes.
+
+    Args:
+        selected_geoms (list): List of selected FreeCAD shape objects.
+        parent_obj (object): The parent FreeCAD object (e.g., a Box).
+
+    Returns:
+        list[str]: A list of selector strings.
+    """
     if not selected_geoms:
         return ["part.edges()"]
 
@@ -139,6 +195,20 @@ def generate_smart_selector_code(selected_geoms, parent_obj):
 
 
 def get_geometry_from_links(obj, parent):
+    """
+    Retrieves the actual topological sub-shapes referenced by a modifier object.
+
+    FreeCAD modifiers (like Fillet/Chamfer) store references to the edges/faces 
+    they modify in properties like `EdgeLinks` or `Base` (as tuple). 
+    This function parses those names and fetches the geometry from the parent.
+
+    Args:
+        obj (App.DocumentObject): The modifier object (e.g., Part::Fillet).
+        parent (App.DocumentObject): The base object being modified (e.g., Part::Box).
+
+    Returns:
+        list[TopoDS_Shape]: A list of edges or faces to be operated on.
+    """
     geoms = []
     names = []
 
@@ -158,10 +228,16 @@ def get_geometry_from_links(obj, parent):
     return geoms
 
 
-# -----------------------------------------------------------------------------
-# Origin helpers
-# -----------------------------------------------------------------------------
 def _use_b123d_origin(obj) -> bool:
+    """
+    Checks if the object is flagged to use build123d origin logic.
+
+    Args:
+        obj (object): The FreeCAD object.
+
+    Returns:
+        bool: True if the property 'CodeCAD_UseB123dOrigin' is set.
+    """
     try:
         return bool(getattr(obj, "CodeCAD_UseB123dOrigin", False))
     except Exception:
@@ -170,9 +246,19 @@ def _use_b123d_origin(obj) -> bool:
 
 def _bbox_center_local(obj):
     """
-    IMPORTANT:
-    In FreeCAD, obj.Shape is typically local; Placement is separate.
-    So Shape.BoundBox.Center is already local for Part:: primitives.
+    Calculates the center of the object's bounding box in local coordinates.
+
+    Note:
+        This is a local helper similar to `parser._bbox_center_local`.
+        In FreeCAD, `obj.Shape` is typically defined in local space relative 
+        to `obj.Placement`. Therefore, `Shape.BoundBox.Center` gives the 
+        geometric center relative to the object's local origin.
+
+    Args:
+        obj (App.DocumentObject): The object to inspect.
+
+    Returns:
+        FreeCAD.Base.Vector | None: The center vector, or None if invalid.
     """
     try:
         shp = getattr(obj, "Shape", None)
@@ -186,10 +272,16 @@ def _bbox_center_local(obj):
         return None
 
 
-# -----------------------------------------------------------------------------
-# Transpile
-# -----------------------------------------------------------------------------
 def transpile_object(obj):
+    """
+    Converts a FreeCAD object into its build123d Python representation.
+
+    Args:
+        obj (object): The FreeCAD object (e.g., Part::Box).
+
+    Returns:
+        str: The generated Python code string.
+    """
     header = f"# {obj.Name}\n"
 
     if obj.TypeId == "Part::Box":

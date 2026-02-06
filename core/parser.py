@@ -4,7 +4,17 @@ import FreeCAD
 import re
 
 
-def resolve_value(val_str, local_env):
+def resolve_value(val_str: str, local_env: dict[str, Any]) -> float | None:
+    """
+    Resolves a string value to a float, checking the local environment for variables.
+
+    Args:
+        val_str (str): The string to resolve (e.g., "10.0" or "L").
+        local_env (dict[str, Any]): Dictionary of local variables.
+
+    Returns:
+        float | None: The resolved float value, or None if unresolvable.
+    """
     try:
         return float(val_str)
     except Exception:
@@ -16,8 +26,21 @@ def resolve_value(val_str, local_env):
     return None
 
 
-def parse_variables(code):
-    """Extracts variable names and values from code string."""
+def parse_variables(code: str) -> list[dict[str, float]]:
+    """
+    Parses code to find primitive calls and updates existing FreeCAD objects.
+
+    Uses regex and AST-like parsing to identify:
+    1. Variable definitions.
+    2. Object creation calls (Box, Cylinder, etc.).
+    3. Pos() transformations.
+
+    Args:
+        code (str): The complete Python script.
+
+    Returns:
+        list[dict[str, float]]: (Success boolean, Status message).
+    """
     vars_found = []
     lines = code.split("\n")
     pattern = re.compile(
@@ -30,12 +53,19 @@ def parse_variables(code):
     return vars_found
 
 
-# ---------------------------------------------------------------------
-# Lightweight call parsing (good enough for primitives)
-# ---------------------------------------------------------------------
-def _extract_call(line: str, func_name: str):
+def _extract_call(line: str, func_name: str) -> str | None:
     """
-    If line contains `func_name(` return the substring inside parentheses, else None.
+    Extracts the raw arguments string from a function call line.
+
+    Locates the substring inside the outermost parentheses of a specific function call.
+
+    Args:
+        line (str): The line of code to parse.
+        func_name (str): The function name to target (e.g., "Box").
+
+    Returns:
+        str | None: The content inside the parentheses (e.g., "10, 20, L=5"), 
+        or None if the function call is not found.
     """
     i = line.find(func_name + "(")
     if i < 0:
@@ -47,9 +77,18 @@ def _extract_call(line: str, func_name: str):
     return s[:j]
 
 
-def _split_args(arg_str: str):
+def _split_args(arg_str: str) -> list[str]:
     """
-    Split a simple Python arg list by commas (no nested parentheses expected here).
+    Splits a raw argument string by commas, respecting parentheses nesting.
+
+    Used to separate arguments while ignoring commas inside tuples or function calls 
+    (e.g., `(1, 2), 3` becomes `['(1, 2)', '3']`).
+
+    Args:
+        arg_str (str): The raw string between parentheses.
+
+    Returns:
+        list[str]: A list of individual argument strings.
     """
     parts = []
     cur = ""
@@ -69,9 +108,17 @@ def _split_args(arg_str: str):
     return parts
 
 
-def _parse_args_kwargs(arg_str: str):
+def _parse_args_kwargs(arg_str: str) -> tuple[list[str], dict[str, str]]:
     """
-    Return (positional_list, kwargs_dict[str->str]) as raw strings.
+    Parses a raw argument string into positional and keyword components.
+
+    Args:
+        arg_str (str): The raw string between parentheses.
+
+    Returns:
+        tuple[list[str], dict[str, str]]: A tuple containing:
+            - list[str]: Positional arguments as raw strings.
+            - dict[str, str]: Keyword arguments map (key -> raw value string).
     """
     pos = []
     kw = {}
@@ -84,10 +131,17 @@ def _parse_args_kwargs(arg_str: str):
     return pos, kw
 
 
-# ---------------------------------------------------------------------
-# Origin state helpers (CodeCAD_UseB123dOrigin)
-# ---------------------------------------------------------------------
-def _ensure_codecad_props(obj):
+def _ensure_codecad_props(obj: App.DocumentObject) -> None:
+    """
+    Injects custom Code-CAD properties into a FreeCAD object if missing.
+
+    Adds:
+    - `CodeCAD_UseB123dOrigin` (Bool): Tracks if the object is visually centered on Build123d origin or not(FreeCAD origin).
+    - `CodeCAD_OriginDelta` (Vector): Stores the world-space offset vector used for alignment.
+
+    Args:
+        obj (App.DocumentObject): The FreeCAD object to patch.
+    """
     if not hasattr(obj, "CodeCAD_UseB123dOrigin"):
         obj.addProperty(
             "App::PropertyBool",
@@ -107,11 +161,20 @@ def _ensure_codecad_props(obj):
         obj.CodeCAD_OriginDelta = FreeCAD.Base.Vector(0, 0, 0)
 
 
-def _bbox_center_local(obj):
+
+def _bbox_center_local(obj: Any) -> FreeCAD.Base.Vector | None:
     """
-    IMPORTANT:
-    In FreeCAD, obj.Shape is typically *local*; Placement is applied separately.
-    So Shape.BoundBox.Center is already local for Part:: primitives.
+    Calculates the center of the object's bounding box in local coordinates.
+
+    For Part:: primitives, `obj.Shape` is defined relative to the object's Placement.
+    Therefore, the bounding box center of `obj.Shape` represents the geometric center 
+    relative to the object's local origin (0,0,0).
+
+    Args:
+        obj (App.DocumentObject): The object to inspect.
+
+    Returns:
+        FreeCAD.Base.Vector | None: The center vector, or None if invalid.
     """
     shp = getattr(obj, "Shape", None)
     if not shp:
@@ -125,10 +188,16 @@ def _bbox_center_local(obj):
         return None
 
 
-def _apply_b123d_origin_for_new_object(obj):
+def _apply_b123d_origin_for_new_object(obj: Any) -> None:
     """
-    For code-first objects: make FreeCAD placement match build123d's default origin.
-    We do this by shifting placement so bbox center becomes local origin.
+    Aligns a newly created object to match build123d's default origin logic.
+
+    Build123d primitives are typically centered at (0,0,0), whereas FreeCAD primitives 
+    are anchored at a corner or base. This function shifts the FreeCAD Placement 
+    so the visual geometric center sits at the Placement origin.
+
+    Args:
+        obj (App.DocumentObject): The newly created FreeCAD object.
     """
     _ensure_codecad_props(obj)
 
@@ -157,10 +226,23 @@ def _apply_b123d_origin_for_new_object(obj):
     obj.CodeCAD_OriginDelta = delta_world
 
 
-def _refresh_b123d_origin_after_param_change(obj):
+def _refresh_b123d_origin_after_param_change(obj: Any) -> bool:
     """
-    If object is in build123d-origin mode and its parameters changed,
-    bbox center changes, so we must recompute and update CodeCAD_OriginDelta.
+    Recalculates alignment shift after object parameters (dimensions) change.
+
+    If dimensions change (e.g., a Box grows from 10 to 20), the center point shifts 
+    relative to the corner. This function:
+    1. Undoes the previous shift (restores corner alignment).
+    2. Recomputes geometry to get the new bounding box.
+    3. Calculates the new center offset.
+    4. Re-applies the shift.
+
+    Args:
+        obj (App.DocumentObject): The object to update.
+
+    Returns:
+        bool: True if an update was performed, False if the object is not in 
+        build123d-origin mode or failed to update.
     """
     _ensure_codecad_props(obj)
 
@@ -203,13 +285,18 @@ def _refresh_b123d_origin_after_param_change(obj):
         return False
 
 
-# ---------------------------------------------------------------------
-# Transform parsing
-# ---------------------------------------------------------------------
-def _parse_pos_transform(line: str, local_env):
+def _parse_pos_transform(line: str, local_env: dict[str, Any]) -> FreeCAD.Base.Vector | None:
     """
-    Parse `part = Pos(x,y,z) * part` translation.
-    Returns FreeCAD.Vector or None.
+    Parses a `Pos(x, y, z)` transformation from a line of code.
+
+    Expected format matches regex: `Pos(...)`.
+
+    Args:
+        line (str): The line of code containing the transformation.
+        local_env (dict): Dictionary used to resolve variable names to values.
+
+    Returns:
+        FreeCAD.Base.Vector | None: The translation vector, or None if not found/invalid.
     """
     m = re.search(r"Pos\s*\(\s*([^\)]+)\)", line)
     if not m:
@@ -226,10 +313,21 @@ def _parse_pos_transform(line: str, local_env):
     return FreeCAD.Base.Vector(float(x), float(y), float(z))
 
 
-# ---------------------------------------------------------------------
-# Main injector
-# ---------------------------------------------------------------------
-def inject_code_to_freecad(full_code):
+def inject_code_to_freecad(full_code: str) -> tuple[bool, str]:
+    """
+    Parses code to find primitive calls and updates existing FreeCAD objects.
+
+    Uses regex and AST-like parsing to identify:
+    1. Variable definitions.
+    2. Object creation calls (Box, Cylinder, etc.).
+    3. Pos() transformations.
+
+    Args:
+        full_code (str): The complete Python script.
+
+    Returns:
+        tuple[bool, str]: (Success boolean, Status message).
+    """
     doc = FreeCAD.ActiveDocument
     if not doc:
         return False, "No Document"
@@ -331,9 +429,7 @@ def inject_code_to_freecad(full_code):
 
         changed_this_obj = False
 
-        # ----------------------------
         # Box
-        # ----------------------------
         if obj.TypeId == "Part::Box" and prim_type == "Box":
             l = resolve_value(pos_args[0], local_env) if len(pos_args) > 0 else gv("length")
             w = resolve_value(pos_args[1], local_env) if len(pos_args) > 1 else gv("width")
@@ -348,9 +444,7 @@ def inject_code_to_freecad(full_code):
                 obj.Height.Value = h
                 changed_this_obj = True
 
-        # ----------------------------
         # Cylinder
-        # ----------------------------
         elif obj.TypeId == "Part::Cylinder" and prim_type == "Cylinder":
             r = gv("radius", None)
             if r is None and len(pos_args) > 0:
@@ -366,9 +460,7 @@ def inject_code_to_freecad(full_code):
                 obj.Height.Value = hh
                 changed_this_obj = True
 
-        # ----------------------------
         # Sphere
-        # ----------------------------
         elif obj.TypeId == "Part::Sphere" and prim_type == "Sphere":
             r = gv("radius", None)
             if r is None and len(pos_args) > 0:
@@ -392,9 +484,7 @@ def inject_code_to_freecad(full_code):
                 obj.Angle3 = float(a3)
                 changed_this_obj = True
 
-        # ----------------------------
         # Cone
-        # ----------------------------
         elif obj.TypeId == "Part::Cone" and prim_type == "Cone":
             br = gv("bottom_radius", None)
             tr = gv("top_radius", None)
@@ -423,9 +513,7 @@ def inject_code_to_freecad(full_code):
                 obj.Angle = float(ang)
                 changed_this_obj = True
 
-        # ----------------------------
         # Torus
-        # ----------------------------
         elif obj.TypeId == "Part::Torus" and prim_type == "Torus":
             mr = gv("major_radius", None)
             nr = gv("minor_radius", None)

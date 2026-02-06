@@ -4,9 +4,7 @@ import re
 import time
 import FreeCAD
 
-# -----------------------------------------------------------------------------
 # GUI IMPORTS (GUARDED so this module can be imported in FreeCADCmd safely)
-# -----------------------------------------------------------------------------
 try:
     import FreeCADGui
     from PySide import QtGui, QtCore
@@ -21,6 +19,12 @@ from core.freecad_api import FreeCADAPI
 
 
 def _gui_available() -> bool:
+    """
+    Checks if the full FreeCAD GUI environment (PySide + FreeCADGui) is loaded.
+
+    Returns:
+        bool: True if GUI modules are present and the GUI subsystem is up.
+    """
     return (
         QtGui is not None
         and QtCore is not None
@@ -43,12 +47,32 @@ else:
     # SELECTION -> BUILD123D SELECTOR HELPERS
     # -----------------------------------------------------------------------------
     def _round3(x):
+        """
+        Rounds a number to 3 decimal places for cleaner code generation.
+
+        Args:
+            x (float): The input number.
+
+        Returns:
+            float | int: The rounded value, or the original input on error.
+        """
         try:
             return round(float(x), 3)
         except Exception:
             return x
 
     def selector_for_vertex(vertex_shape):
+        """
+        Generates build123d selector code for a specific vertex.
+
+        Uses `sort_by_distance` with the vertex's coordinates.
+
+        Args:
+            vertex_shape (TopoDS_Vertex): The vertex geometry.
+
+        Returns:
+            str | None: The selector string (e.g., `part.vertices().sort_by_distance(...).first`).
+        """
         try:
             p = vertex_shape.Point
             x, y, z = _round3(p.x), _round3(p.y), _round3(p.z)
@@ -57,6 +81,17 @@ else:
             return None
 
     def selector_for_edge(edge_shape):
+        """
+        Generates build123d selector code for a specific edge.
+
+        Uses `sort_by_distance` with the edge's center of mass.
+
+        Args:
+            edge_shape (TopoDS_Edge): The edge geometry.
+
+        Returns:
+            str | None: The selector string.
+        """
         try:
             c = edge_shape.CenterOfMass
             x, y, z = _round3(c.x), _round3(c.y), _round3(c.z)
@@ -65,6 +100,19 @@ else:
             return None
 
     def selector_for_face(face_shape):
+        """
+        Generates build123d selector code for a specific face.
+
+        Heuristics:
+        1. If planar and aligned with X/Y/Z axes, uses `sort_by(Axis.X)`.
+        2. Fallback to `sort_by_distance` using the face's center of mass.
+
+        Args:
+            face_shape (TopoDS_Face): The face geometry.
+
+        Returns:
+            str | None: The selector string.
+        """
         try:
             c = face_shape.CenterOfMass
             cx, cy, cz = round(c.x, 2), round(c.y, 2), round(c.z, 2)
@@ -84,6 +132,15 @@ else:
             return None
 
     def selector_from_subshape(subshape):
+        """
+        Dispatches selector generation based on the shape type (Vertex/Edge/Face).
+
+        Args:
+            subshape (TopoDS_Shape): The sub-object selected in FreeCAD.
+
+        Returns:
+            str | None: The generated selector code.
+        """
         try:
             st = getattr(subshape, "ShapeType", None)
             if st == "Vertex":
@@ -100,7 +157,21 @@ else:
     # WIDGET CLASSES
     # -----------------------------------------------------------------------------
     class ParameterWidget(QtGui.QWidget):
+        """
+        A single slider widget for the Tuner tab.
+
+        Attributes:
+            name (str): Variable name.
+            parent_dock (B123dDockWidget): Reference to main dock.
+        """
         def __init__(self, name, value, scale_limit, parent_dock):
+            """
+            Args:
+                name (str): Variable name.
+                value (float): Current value.
+                scale_limit (float): Max range for the slider.
+                parent_dock (B123dDockWidget): The parent widget.
+            """
             super().__init__()
             self.name = name
             self.parent_dock = parent_dock
@@ -150,11 +221,22 @@ else:
             self.parent_dock.update_variable_from_slider(self.name, new_val)
 
     class B123dLiveSyncObserver:
+        """
+        FreeCAD Document Observer.
+        
+        Watches for object changes in the document to trigger GUI -> Code updates.
+        """
         def __init__(self, panel):
             self.panel = panel
 
         def slotChangedObject(self, obj, prop):
-            # Ignore changes caused by our own code-to-GUI application
+            """
+            Called by FreeCAD when an object property changes.
+
+            Args:
+                obj (App.DocumentObject): The modified object.
+                prop (str): The name of the property that changed.
+            """
             if self.panel.programmatic_update:
                 return
             if self.panel.gui_to_code_suppressed():
@@ -164,6 +246,12 @@ else:
                 self.panel.trigger_gui_to_code_update()
 
         def slotCreatedObject(self, obj):
+            """
+            Called by FreeCAD when a new object is added to the document.
+
+            Args:
+                obj (App.DocumentObject): The created object.
+            """
             if self.panel.programmatic_update:
                 return
             if self.panel.gui_to_code_suppressed():
@@ -171,6 +259,12 @@ else:
             self.panel.trigger_gui_to_code_update()
 
         def slotDeletedObject(self, obj):
+            """
+            Called by FreeCAD when an object is removed from the document.
+
+            Args:
+                obj (App.DocumentObject): The deleted object.
+            """
             try:
                 if self.panel.programmatic_update:
                     return
@@ -181,10 +275,24 @@ else:
                 pass
 
     class B123dSelectionObserver:
+        """
+        FreeCAD Selection Observer.
+
+        Monitors user selection in the 3D view to update the 'Insert Selector' UI helper.
+        """
         def __init__(self, panel):
             self.panel = panel
 
         def addSelection(self, doc, obj_name, sub, pos):
+            """
+            Called when a user selects an object or sub-element in the 3D view.
+
+            Args:
+                doc (str): Name of the document.
+                obj_name (str): Name of the selected object.
+                sub (str): Sub-element name (e.g., "Face1").
+                pos (tuple): 3D coordinates of the click.
+            """
             try:
                 if self.panel.programmatic_update:
                     return
@@ -194,6 +302,9 @@ else:
                 pass
 
         def removeSelection(self, doc, obj_name, sub):
+            """
+            Called when a user deselects an object.
+            """
             try:
                 if self.panel.programmatic_update:
                     return
@@ -203,6 +314,9 @@ else:
                 pass
 
         def clearSelection(self, doc):
+            """
+            Called when the user clears the entire selection (e.g., clicking background).
+            """
             try:
                 if self.panel.programmatic_update:
                     return
@@ -212,13 +326,30 @@ else:
                 pass
 
         def setPreselection(self, doc, obj_name, sub):
+            """
+            Called on mouse-over (ignored).
+            """
             pass
 
     # -----------------------------------------------------------------------------
     # MAIN DOCK
     # -----------------------------------------------------------------------------
     class B123dDockWidget(QtGui.QDockWidget):
+        """
+        The main Code-CAD Studio dock panel.
+
+        Attributes:
+            engine (SyncEngine): The logic engine instance.
+            editor (QPlainTextEdit): The code editor widget.
+            param_widgets (dict): Map of variable names to ParameterWidgets.
+        """
         def __init__(self, parent=None):
+            """
+            Initializes the Dock Widget and sets up the UI layout.
+
+            Args:
+                parent (QWidget, optional): Parent widget. Defaults to None.
+            """
             super().__init__(parent)
             self.setWindowTitle("Code-CAD Studio")
             self.resize(520, 750)
@@ -342,12 +473,35 @@ else:
         # Suppression helpers
         # -------------------------------------------------------------------------
         def gui_to_code_suppressed(self) -> bool:
+            """
+            Checks if the GUI -> Code sync is temporarily disabled.
+
+            Returns:
+                bool: True if suppressed.
+            """
             return time.monotonic() < float(self._suppress_gui_to_code_until)
 
         def suppress_gui_to_code_for(self, seconds: float):
+            """
+            Temporarily disables FreeCAD -> Editor updates.
+
+            Used to prevent an infinite loop where editing code triggers a recompute,
+            which triggers the observer, which tries to rewrite the code.
+
+            Args:
+                seconds (float): Duration to suppress updates.
+            """
             self._suppress_gui_to_code_until = time.monotonic() + float(seconds)
 
         def closeEvent(self, e):
+            """
+            Cleanup hook when the dock is closed.
+
+            Removes document and selection observers to prevent memory leaks.
+
+            Args:
+                e (QCloseEvent): The close event.
+            """
             try:
                 FreeCAD.removeDocumentObserver(self.observer)
             except Exception:
@@ -406,6 +560,9 @@ else:
         # GUI -> CODE
         # -------------------------------------------------------------------------
         def trigger_gui_to_code_update(self):
+            """
+            Starts the debounce timer to read FreeCAD state and update the editor.
+            """
             if self.gui_to_code_suppressed():
                 return
             self.status.setText("Reading FreeCAD…")
@@ -413,9 +570,19 @@ else:
             self.timer_gui_to_code.start(300)
 
         def find_tip_object(self):
+            """
+            Delegates to the engine to find the current tip object.
+
+            Returns:
+                App.DocumentObject | None: The tip object.
+            """
             return self.engine.find_tip_object()
 
         def perform_gui_to_code(self):
+            """
+            Triggered when the user changes a FreeCAD object (e.g., via Property View).
+            Calls the Transpiler to update the text editor.
+            """
             if self.gui_to_code_suppressed():
                 return
 
@@ -457,6 +624,10 @@ else:
         # CODE -> GUI
         # -------------------------------------------------------------------------
         def on_code_edited(self):
+            """
+            Qt Slot called whenever the text in the editor changes.
+            Starts the debounce timer for Code -> GUI sync.
+            """
             if self.programmatic_update:
                 return
             self.status.setText("Writing…")
@@ -465,6 +636,10 @@ else:
             self.refresh_tuner_ui()
 
         def perform_code_to_gui(self):
+            """
+            Triggered when the user types in the editor.
+            Calls the Engine -> Parser to update FreeCAD objects.
+            """
             code = self.editor.toPlainText()
 
             # CRITICAL:
@@ -494,12 +669,19 @@ else:
             self.update_origin_button_label()
 
         def _end_programmatic_update(self):
+            """
+            Callback to reset the `programmatic_update` flag after a delay.
+            """
             self.programmatic_update = False
 
         # -------------------------------------------------------------------------
         # Verification (deferred)
         # -------------------------------------------------------------------------
         def deferred_verification(self):
+            """
+            Runs after an update to compare the FreeCAD object and Shadow object.
+            Updates the UI label to "MATCH CONFIRMED" (Green) or "MISMATCH" (Red).
+            """
             try:
                 self.engine.api.recompute()
             except Exception:
@@ -534,6 +716,9 @@ else:
         # TUNER LOGIC
         # -------------------------------------------------------------------------
         def refresh_tuner_ui(self):
+            """
+            Parses variables from the current code and rebuilds the Tuner sliders.
+            """
             current_vars = self.engine.parse_variables(self.editor.toPlainText())
             current_names = set(v["name"] for v in current_vars)
             vals = [v["value"] for v in current_vars]
@@ -574,6 +759,13 @@ else:
                     self.param_widgets[name] = w
 
         def update_variable_from_slider(self, name, val):
+            """
+            Called when a slider moves. Regex-replaces the variable in the editor.
+
+            Args:
+                name (str): Variable name.
+                val (float): New value.
+            """
             code = self.editor.toPlainText()
             if not code.strip():
                 return
@@ -609,6 +801,13 @@ else:
         # Selector insertion (button-driven)
         # -------------------------------------------------------------------------
         def set_selector_text(self, text, hint=None):
+            """
+            Updates the selector helper UI label and button state.
+
+            Args:
+                text (str | None): The generated selector code, or None if invalid.
+                hint (str, optional): Message to display if text is None.
+            """
             self.current_selector_text = text
             if text:
                 self.sel_lbl.setText(text)
@@ -620,6 +819,10 @@ else:
                 self.btn_insert_selector.setEnabled(False)
 
         def update_selector_from_current_selection(self):
+            """
+            Polls the current FreeCAD selection state and generates selector code.
+            Updates the "Insert Selector" UI area.
+            """
             if not self.find_tip_object():
                 self.set_selector_text(None, hint="No part in document. Create a Part:: object…")
                 return
@@ -652,6 +855,9 @@ else:
                 self.set_selector_text(None, hint="Selection unsupported/complex")
 
         def insert_current_selector_at_cursor(self):
+            """
+            Inserts the generated selector code into the text editor at the current cursor position.
+            """
             if not self.current_selector_text:
                 return
 
@@ -666,6 +872,9 @@ else:
         # Origin Toggle (delegates to engine)
         # -------------------------------------------------------------------------
         def update_origin_button_label(self):
+            """
+            Checks the engine state for the current tip and updates the Origin Toggle button text.
+            """
             tip = self.find_tip_object()
             root, using = self.engine.get_origin_state(tip)
             if not root:
@@ -677,6 +886,9 @@ else:
             self.btn_origin_toggle.setText("Use FreeCAD origin" if using else "Use build123d origin")
 
         def toggle_origin_for_tip(self):
+            """
+            Handler for the 'Use build123d/FreeCAD origin' button.
+            """
             tip = self.find_tip_object()
             if not tip:
                 return
@@ -704,6 +916,12 @@ else:
     _panel_instance = None
 
     def create_panel():
+        """
+        Creates and shows the Dock Widget.
+
+        Returns:
+            B123dDockWidget: The created or existing instance.
+        """
         global _panel_instance
         mw = FreeCADGui.getMainWindow()
 
@@ -720,6 +938,10 @@ else:
         return _panel_instance
 
     def toggle_panel():
+        """
+        Toggles the visibility of the Code-CAD Studio dock widget.
+        If the widget does not exist, it creates it.
+        """
         global _panel_instance
         if _panel_instance and _panel_instance.isVisible():
             _panel_instance.hide()
