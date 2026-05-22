@@ -193,6 +193,21 @@ A FreeCAD workbench for bidirectional sync between FreeCAD and a Build123d code 
   1. How to find undocumented functions or variables in code programatticaly 
   1. Possibly fix the strange way dock.py nests the entire class inside an if/else
   1. Add mouseover (preselect) functionality in the 3d view for highlighting code blocks/lines in the code cad window dock.py.B123dSelectionObservers.setPreselection()
+  1. Handle objects that have same FC and B123d origin better by greying out the orign switch button and telling user they are the same
+  1. ChatGPT TODOs after repo scan 5/22/26
+  What I would do next
+          I’d resume development in this order:
+          Make the current repo boringly runnable. Add missing imports/type fixes, run ruff, run py_compile, and make one smoke test for box_example.py → FreeCAD object → shadow → verify.
+          Define the true source of truth. For Git-native CAD, I would not make arbitrary Python the canonical storage format. I would define a small JSON/YAML IR with stable IDs, then generate build123d Python as a view/export format. Python can remain the power-user mode.
+          Replace name-based sync with persistent IDs. Something like:
+
+      # Box [id=6f4a...]
+      part = Box(L, W, H)
+
+      or better, store ID in the IR and store the same ID in a FreeCAD custom property.
+
+      Move selector logic out of gui/dock.py. The GUI should detect what the user selected; the core should know how to express that as build123d selectors. Your README already points in this direction.
+      Treat cloud execution as hostile. The server path is promising, but exec() plus arbitrary build123d code means the cloud version needs sandboxing, containers, timeouts, file/network restrictions, and probably AST whitelisting or IR-first execution.
   1. 
 
   
