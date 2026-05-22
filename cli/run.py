@@ -9,13 +9,12 @@ import json
 import math
 
 import FreeCAD
-
+import tempfile
 
 # ----------------------------
 # Logging: stdout + optional log file
 # ----------------------------
 _LOG_FH = None
-
 
 def _linebuf():
     try:
@@ -142,12 +141,123 @@ def _export_fcstd(doc, out_path: str):
         return False, f"FCStd save failed: {e}"
 
 
-def _gather_target_shape(doc):
+def _copy_shape_without_shadow_offset(obj):
     """
-    Return a Part.Shape to mesh/export:
-    - Prefer engine tip object if possible
-    - else compound all non-shadow Part:: shapes
+    Return a copy of obj.Shape with Build123d_Shadow.DisplayOffset removed.
+
+    The GUI intentionally displays Build123d_Shadow offset to the side for
+    visual comparison. The CLI/web export should not preserve that display-only
+    offset, otherwise rendered parts appear shifted in the browser/export.
     """
+    shp = getattr(obj, "Shape", None)
+    if not shp or shp.isNull():
+        return None
+
+    try:
+        out = shp.copy()
+    except Exception:
+        out = shp
+
+    try:
+        off = getattr(obj, "DisplayOffset", None)
+        if off and (abs(off.x) > 1e-12 or abs(off.y) > 1e-12 or abs(off.z) > 1e-12):
+            out.translate(FreeCAD.Base.Vector(-float(off.x), -float(off.y), -float(off.z)))
+    except Exception:
+        pass
+
+    return out
+
+def _shape_from_build123d_code(code: str):
+    """
+    Execute submitted build123d code directly and convert its `part` variable
+    into a FreeCAD Part.Shape.
+
+    This is the correct source of truth for the web preview, because the
+    parser currently reconstructs primitives but does not reconstruct later
+    build123d operations like fillet/chamfer into native FreeCAD objects.
+    """
+    if not code or not code.strip():
+        return None, "empty code"
+
+    temp_path = None
+
+    try:
+        compile(code, "<codecad-input>", "exec")
+
+        import Part
+        from core.shadow import save_any_shape
+
+        env = {}
+        exec("from build123d import *", env)
+        exec(code, env)
+
+        if "part" not in env:
+            return None, "code did not define `part`"
+
+        raw_obj = env["part"]
+        _log(f"[CodeCADStudio] direct build123d object type: {type(raw_obj)!r}")
+
+        fd, temp_path = tempfile.mkstemp(suffix=".brep")
+        os.close(fd)
+
+        if not save_any_shape(raw_obj, temp_path):
+            return None, "save_any_shape returned False"
+
+        shape = Part.Shape()
+        shape.read(temp_path)
+
+        if shape.isNull():
+            return None, "BREP loaded, but shape is null"
+
+        _log(
+            "[CodeCADStudio] direct build123d shape: "
+            f"solids={len(getattr(shape, 'Solids', []) or [])}, "
+            f"faces={len(getattr(shape, 'Faces', []) or [])}, "
+            f"edges={len(getattr(shape, 'Edges', []) or [])}"
+        )
+
+        return shape, "direct build123d code"
+
+    except Exception as e:
+        return None, f"{type(e).__name__}: {e}"
+
+    finally:
+        try:
+            if temp_path and os.path.exists(temp_path):
+                os.remove(temp_path)
+        except Exception:
+            pass
+
+def _gather_target_shape(doc, code: str | None = None):
+    """
+    Return a Part.Shape to mesh/export.
+
+    Web/headless export priority:
+    1. Direct build123d code execution result
+    2. Build123d_Shadow with GUI display offset removed
+    3. Native FreeCAD tip object
+    4. Compound of non-shadow Part:: objects
+    """
+    # 1) Best source of truth for code-first web/headless rendering.
+    if code:
+        shape, reason = _shape_from_build123d_code(code)
+        if shape is not None and not shape.isNull():
+            _log(f"[CodeCADStudio] export source: {reason}")
+            return shape
+
+        _log(f"[CodeCADStudio] direct build123d export unavailable: {reason}")
+
+    # 2) Fallback to shadow object.
+    try:
+        shadow = doc.getObject("Build123d_Shadow")
+        shadow_shape = _copy_shape_without_shadow_offset(shadow) if shadow else None
+        if shadow_shape and not shadow_shape.isNull():
+            _log("[CodeCADStudio] export source: Build123d_Shadow")
+            return shadow_shape
+    except Exception as e:
+        _log(f"[CodeCADStudio] shadow export unavailable: {e}")
+
+    # 3) Fallback to native FreeCAD tip object.
     try:
         from core.engine import SyncEngine
         from core.freecad_api import FreeCADAPI
@@ -155,18 +265,21 @@ def _gather_target_shape(doc):
         engine = SyncEngine(FreeCADAPI())
         tip = engine.find_tip_object(doc)
         if tip and getattr(tip, "Shape", None) and not tip.Shape.isNull():
+            _log(f"[CodeCADStudio] export source: native tip object {tip.Name}")
             return tip.Shape
-    except Exception:
-        pass
+    except Exception as e:
+        _log(f"[CodeCADStudio] native tip export unavailable: {e}")
 
+    # 4) Last fallback: compound all non-shadow Part:: shapes.
     shapes = []
     for obj in doc.Objects:
         if obj.Name == "Build123d_Shadow":
             continue
         if not getattr(obj, "TypeId", "").startswith("Part::"):
             continue
+
         shp = getattr(obj, "Shape", None)
-        if shp and (not shp.isNull()):
+        if shp and not shp.isNull():
             shapes.append(shp)
 
     if not shapes:
@@ -174,16 +287,15 @@ def _gather_target_shape(doc):
 
     try:
         import Part
-
+        _log("[CodeCADStudio] export source: compound native Part objects")
         return shapes[0] if len(shapes) == 1 else Part.makeCompound(shapes)
     except Exception:
+        _log("[CodeCADStudio] export source: first native Part object")
         return shapes[0]
 
-
-def _export_mesh_stl(doc, out_path: str, quality: str):
+def _export_mesh_stl(doc, out_path: str, quality: str, code: str | None = None):
     out_path = _normalize_path(out_path)
-
-    shape = _gather_target_shape(doc)
+    shape = _gather_target_shape(doc, code=code)
     if shape is None:
         return False, "Mesh not created (no Part shapes in document)"
 
@@ -257,13 +369,25 @@ def _bbox_from_vertices_flat(verts_flat):
     }
 
 
-def _export_three_cad_viewer_shapes_json(doc, out_path: str, quality: str):
+
+def _export_three_cad_viewer_shapes_json(doc, out_path: str, quality: str, code: str = None):
     out_path = _normalize_path(out_path)
 
-    shape = _gather_target_shape(doc)
-    if shape is None:
-        return False, "Shapes JSON not created (no Part shapes in document)"
+    shape = None
 
+    if code:
+        shape, reason = _shape_from_build123d_code(code)
+        if shape is not None and not shape.isNull():
+            _log(f"[CodeCADStudio] Shapes JSON export source: {reason}")
+        else:
+            _log(f"[CodeCADStudio] direct build123d Shapes JSON failed: {reason}")
+
+    if shape is None:
+        shape = _gather_target_shape(doc)
+        _log("[CodeCADStudio] Shapes JSON export source: native FreeCAD fallback")
+
+    if shape is None:
+        return False, "Shapes JSON not created (no Part shapes in document)"  
     q = (quality or "preview").lower().strip()
 
     # Keep consistent with your STL preview/final intent.
@@ -465,13 +589,13 @@ def main(argv=None):
                 _log("[CodeCADStudio] WARNING: --out extension not recognized (use .FCStd or .step/.stp)")
 
         if mesh_path:
-            ok, msg = _export_mesh_stl(doc, mesh_path, args.mesh_quality)
+            ok, msg = _export_mesh_stl(doc, mesh_path, args.mesh_quality, code=code)
             _log("[CodeCADStudio] " + msg)
             if not ok:
                 return 7
 
         if shapes_path:
-            ok, msg = _export_three_cad_viewer_shapes_json(doc, shapes_path, args.mesh_quality)
+            ok, msg = _export_three_cad_viewer_shapes_json(doc, shapes_path, args.mesh_quality, code=code)
             _log("[CodeCADStudio] " + msg)
             if not ok:
                 return 8
