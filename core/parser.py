@@ -1,8 +1,9 @@
 # core/parser.py
 
 import FreeCAD
+import FreeCAD as App
 import re
-
+from typing import Any
 
 def resolve_value(val_str: str, local_env: dict[str, Any]) -> float | None:
     """
