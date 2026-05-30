@@ -899,17 +899,35 @@ else:
             """
             Inserts or replaces editor code using a shared CodeSnippet.
 
-            Args:
-                code: build123d Python code.
-                mode: "replace" replaces the editor; "append" inserts at cursor.
+            Append-mode snippets always go at the bottom of the editor so users can
+            build a linear operation chain like:
+                primitive -> fillet -> transform
+            without manually moving the cursor after every button click.
             """
             if mode == "replace":
-                self.editor.setPlainText(code)
+                self.editor.setPlainText(code.rstrip() + "\n")
+                self._move_editor_cursor_to_bottom()
                 return
 
-            cursor = self.editor.textCursor()
-            cursor.insertText(code)
+            current = self.editor.toPlainText().rstrip()
+            snippet = code.strip("\n")
 
+            if current:
+                new_text = current + "\n\n" + snippet + "\n"
+            else:
+                new_text = snippet + "\n"
+
+            self.editor.setPlainText(new_text)
+            self._move_editor_cursor_to_bottom()
+
+        def _move_editor_cursor_to_bottom(self):
+            """
+            Move editor cursor to the end of the document.
+            """
+            cursor = self.editor.textCursor()
+            cursor.movePosition(QtGui.QTextCursor.End)
+            self.editor.setTextCursor(cursor)
+            self.editor.setFocus()
         # -------------------------------------------------------------------------
         # Origin Toggle (delegates to engine)
         # -------------------------------------------------------------------------

@@ -233,29 +233,40 @@ function showShapes(shapes) {
   viewer.render(shapes, renderOptions, viewerOptions);
 }
 
+function moveCodeCursorToBottom() {
+  const pos = elCode.value.length;
+  try {
+    elCode.focus();
+    elCode.setSelectionRange(pos, pos);
+    elCode.scrollTop = elCode.scrollHeight;
+  } catch {
+    // ignore
+  }
+}
+
+function appendCodeAtBottom(code) {
+  const current = elCode.value.trimEnd();
+  const snippet = String(code || "").replace(/^\n+|\n+$/g, "");
+
+  if (current) {
+    elCode.value = `${current}\n\n${snippet}\n`;
+  } else {
+    elCode.value = `${snippet}\n`;
+  }
+
+  moveCodeCursorToBottom();
+}
+
 function insertSnippet(snip) {
   if (!snip || !snip.code) return;
 
   if (snip.mode === "replace") {
-    elCode.value = snip.code;
+    elCode.value = String(snip.code).trimEnd() + "\n";
+    moveCodeCursorToBottom();
     return;
   }
 
-  const start = elCode.selectionStart ?? elCode.value.length;
-  const end = elCode.selectionEnd ?? elCode.value.length;
-
-  elCode.value =
-    elCode.value.slice(0, start) +
-    snip.code +
-    elCode.value.slice(end);
-
-  const newPos = start + snip.code.length;
-  try {
-    elCode.focus();
-    elCode.setSelectionRange(newPos, newPos);
-  } catch {
-    // ignore
-  }
+  appendCodeAtBottom(snip.code);
 }
 
 async function loadSnippets() {
@@ -357,6 +368,7 @@ async function render(mesh_quality) {
 }
 
 loadSnippets();
+elCode.addEventListener("click", moveCodeCursorToBottom);
 btnPreview.addEventListener("click", () => render("preview"));
 btnFinal.addEventListener("click", () => render("final"));
 btnClearLog.addEventListener("click", () => (elLog.textContent = ""));
