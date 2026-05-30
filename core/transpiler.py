@@ -271,6 +271,80 @@ def _bbox_center_local(obj):
     except Exception:
         return None
 
+def _prop_float(obj, prop_name: str, default: float = 0.0) -> float:
+    """
+    Reads a FreeCAD property as a float.
+
+    Handles App::PropertyLength / quantity-like values such as `5.0 mm`,
+    as well as plain numeric properties.
+    """
+    try:
+        v = obj.getPropertyByName(prop_name)
+    except Exception:
+        v = getattr(obj, prop_name, default)
+
+    try:
+        return float(v.Value)
+    except Exception:
+        try:
+            return float(v)
+        except Exception:
+            return float(default)
+
+
+def _is_part_tube(obj) -> bool:
+    """
+    Detects a FreeCAD Part Workbench Tube.
+
+    FreeCAD's Part Tube is created through BasicShapes.Shapes.addTube().
+    It reports as Part::FeaturePython, not Part::Tube, and has:
+      - OuterRadius
+      - InnerRadius
+      - Height
+    """
+    if not obj:
+        return False
+
+    if getattr(obj, "TypeId", "") != "Part::FeaturePython":
+        return False
+
+    props = set(getattr(obj, "PropertiesList", []) or [])
+    return {"OuterRadius", "InnerRadius", "Height"}.issubset(props)
+
+
+def _transpile_part_tube(obj, header: str) -> str:
+    """
+    Converts a FreeCAD Part Tube to native build123d algebra-mode code.
+
+    build123d has no Tube primitive, so we emit the equivalent:
+      outer cylinder - inner cylinder
+    """
+    outer = _prop_float(obj, "OuterRadius", 5.0)
+    inner = _prop_float(obj, "InnerRadius", 2.0)
+    height = _prop_float(obj, "Height", 10.0)
+
+    if outer <= 0:
+        return f"{header}# Error: Tube outer radius must be greater than zero"
+    if inner < 0:
+        return f"{header}# Error: Tube inner radius must be zero or greater"
+    if inner >= outer:
+        return f"{header}# Error: Tube inner radius must be smaller than outer radius"
+    if height <= 0:
+        return f"{header}# Error: Tube height must be greater than zero"
+
+    # FreeCAD Part Tube bottom face lies on the XY plane with center at origin.
+    # That corresponds to build123d Z-min alignment for cylinders.
+    if _use_b123d_origin(obj):
+        align_arg = ""
+    else:
+        align_arg = ", align=(Align.CENTER, Align.CENTER, Align.MIN)"
+
+    return (
+        f"{header}"
+        f"outer = Cylinder(radius={outer}, height={height}{align_arg})\n"
+        f"inner = Cylinder(radius={inner}, height={height}{align_arg})\n"
+        "part = outer - inner"
+    )
 
 def transpile_object(obj):
     """
@@ -283,6 +357,9 @@ def transpile_object(obj):
         str: The generated Python code string.
     """
     header = f"# {obj.Name}\n"
+
+    if _is_part_tube(obj):
+        return _transpile_part_tube(obj, header)
 
     if obj.TypeId == "Part::Box":
         l, w, h = obj.Length.Value, obj.Width.Value, obj.Height.Value
