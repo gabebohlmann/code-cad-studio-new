@@ -11,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from server.freecad_runner import JobStore, run_freecad_job, Job
+from core.snippets import list_snippets
 
 
 def norm(p: str) -> str:
@@ -140,6 +141,12 @@ def health():
         "web_dir": WEB_DIR,
     }
 
+@app.get("/api/v1/snippets")
+def snippets():
+    """
+    Returns shared code editor snippets for the browser UI.
+    """
+    return {"snippets": list_snippets()}
 
 @app.post("/api/v1/jobs", response_model=RenderResponse)
 def create_job(req: RenderRequest):

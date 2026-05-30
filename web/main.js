@@ -18,6 +18,7 @@ const elViewer = document.getElementById("viewer");
 const elCode = document.getElementById("code");
 const elLog = document.getElementById("log");
 const elStatus = document.getElementById("status");
+const elSnippetToolbar = document.getElementById("snippetToolbar");
 const btnPreview = document.getElementById("renderPreview");
 const btnFinal = document.getElementById("renderFinal");
 const btnClearLog = document.getElementById("clearLog");
@@ -232,6 +233,73 @@ function showShapes(shapes) {
   viewer.render(shapes, renderOptions, viewerOptions);
 }
 
+function insertSnippet(snip) {
+  if (!snip || !snip.code) return;
+
+  if (snip.mode === "replace") {
+    elCode.value = snip.code;
+    return;
+  }
+
+  const start = elCode.selectionStart ?? elCode.value.length;
+  const end = elCode.selectionEnd ?? elCode.value.length;
+
+  elCode.value =
+    elCode.value.slice(0, start) +
+    snip.code +
+    elCode.value.slice(end);
+
+  const newPos = start + snip.code.length;
+  try {
+    elCode.focus();
+    elCode.setSelectionRange(newPos, newPos);
+  } catch {
+    // ignore
+  }
+}
+
+async function loadSnippets() {
+  if (!elSnippetToolbar) return;
+
+  try {
+    const res = await fetch(`${API}/snippets`);
+    if (!res.ok) throw new Error(`GET /snippets failed (${res.status})`);
+
+    const data = await res.json();
+    const snippets = data.snippets || [];
+
+    const groups = new Map();
+    for (const snip of snippets) {
+      if (!groups.has(snip.group)) groups.set(snip.group, []);
+      groups.get(snip.group).push(snip);
+    }
+
+    elSnippetToolbar.innerHTML = "";
+
+    for (const [groupName, groupSnippets] of groups.entries()) {
+      const group = document.createElement("div");
+      group.className = "snippet-group";
+
+      const label = document.createElement("span");
+      label.className = "snippet-group-label";
+      label.textContent = groupName + ": ";
+      group.appendChild(label);
+
+      for (const snip of groupSnippets) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.textContent = snip.label;
+        btn.addEventListener("click", () => insertSnippet(snip));
+        group.appendChild(btn);
+      }
+
+      elSnippetToolbar.appendChild(group);
+    }
+  } catch (e) {
+    log(`snippet load failed: ${e}`);
+  }
+}
+
 // --------------------
 // Render loop (job submit + poll + show)
 // --------------------
@@ -288,6 +356,7 @@ async function render(mesh_quality) {
   }
 }
 
+loadSnippets();
 btnPreview.addEventListener("click", () => render("preview"));
 btnFinal.addEventListener("click", () => render("final"));
 btnClearLog.addEventListener("click", () => (elLog.textContent = ""));

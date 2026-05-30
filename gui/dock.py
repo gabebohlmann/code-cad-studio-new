@@ -16,6 +16,7 @@ except Exception:
 # Headless-safe engine layer
 from core.engine import SyncEngine
 from core.freecad_api import FreeCADAPI
+from core.snippets import SNIPPETS
 
 
 def _gui_available() -> bool:
@@ -386,6 +387,32 @@ else:
             self.sel_lbl = QtGui.QLabel("Select a face/edge/vertex…")
             self.sel_lbl.setStyleSheet("background: #eee; padding: 6px;")
             tools_l.addWidget(self.sel_lbl)
+            
+            # Shared code snippet buttons.
+            # These mutate the editor text; the normal textChanged debounce then
+            # applies code -> FreeCAD and updates the shadow.
+            snippets_box = QtGui.QGroupBox("Insert Code")
+            snippets_l = QtGui.QVBoxLayout()
+            snippets_box.setLayout(snippets_l)
+
+            grouped = {}
+            for snip in SNIPPETS:
+                grouped.setdefault(snip.group, []).append(snip)
+
+            for group_name, snippets in grouped.items():
+                snippets_l.addWidget(QtGui.QLabel(group_name))
+
+                row_l = QtGui.QHBoxLayout()
+                for snip in snippets:
+                    btn = QtGui.QPushButton(snip.label)
+                    btn.clicked.connect(
+                        lambda checked=False, s=snip: self.insert_code_snippet(s.code, s.mode)
+                    )
+                    row_l.addWidget(btn)
+
+                snippets_l.addLayout(row_l)
+
+            tools_l.addWidget(snippets_box)
 
             row = QtGui.QHBoxLayout()
             self.btn_insert_selector = QtGui.QPushButton("Insert Selector")
@@ -867,6 +894,21 @@ else:
             # Apply pipeline
             self.perform_code_to_gui()
             self.refresh_tuner_ui()
+
+        def insert_code_snippet(self, code: str, mode: str = "append"):
+            """
+            Inserts or replaces editor code using a shared CodeSnippet.
+
+            Args:
+                code: build123d Python code.
+                mode: "replace" replaces the editor; "append" inserts at cursor.
+            """
+            if mode == "replace":
+                self.editor.setPlainText(code)
+                return
+
+            cursor = self.editor.textCursor()
+            cursor.insertText(code)
 
         # -------------------------------------------------------------------------
         # Origin Toggle (delegates to engine)
