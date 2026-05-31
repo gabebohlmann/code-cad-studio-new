@@ -152,19 +152,18 @@ class SyncEngine:
             return ""
         return "from build123d import *\n\n" + transpile_object(tip_obj)
 
-    def apply_code_to_freecad(self, code: str):
+    def apply_code_to_freecad(self, code: str, trace: list[str] | None = None):
         """
         Parses the provided code and injects parameter values into existing FreeCAD objects.
 
-        This performs the Code -> GUI synchronization direction.
-
         Args:
             code (str): The Python source code.
+            trace (list[str] | None): Optional FreeCAD API trace output list.
 
         Returns:
             tuple[bool, str]: (Success boolean, Status message).
         """
-        return inject_code_to_freecad(code)
+        return inject_code_to_freecad(code, trace=trace)
 
     def ensure_shadow(self):
         """
@@ -424,15 +423,14 @@ class SyncEngine:
         3. Recompute document.
         4. Verify geometry match.
 
-        Args:
-            code (str): The Python code to process.
-            make_shadow (bool, optional): Whether to update the shadow. Defaults to True.
-            verify (bool, optional): Whether to run geometric verification. Defaults to True.
-
         Returns:
-            dict: Result dictionary containing keys: 'ok', 'message', 'tip', 'shadow', 'verified', 'verify_reason'.
+            dict: Result dictionary containing status, tip/shadow objects,
+            verification info, and the FreeCAD API trace.
         """
-        ok, msg = self.apply_code_to_freecad(code)
+        trace: list[str] = []
+
+        ok, msg = self.apply_code_to_freecad(code, trace=trace)
+        freecad_code = "\n".join(trace).rstrip() + ("\n" if trace else "")
 
         if not ok:
             return {
@@ -442,6 +440,8 @@ class SyncEngine:
                 "shadow": None,
                 "verified": False,
                 "verify_reason": "Not verified",
+                "freecad_code": freecad_code,
+                "trace": freecad_code,
             }
 
         shadow = None
@@ -451,6 +451,7 @@ class SyncEngine:
         self.api.recompute()
 
         tip = self.find_tip_object()
+
         if not tip or not shadow or not verify:
             return {
                 "ok": True,
@@ -459,9 +460,12 @@ class SyncEngine:
                 "shadow": shadow,
                 "verified": False,
                 "verify_reason": "Skipped/Unavailable",
+                "freecad_code": freecad_code,
+                "trace": freecad_code,
             }
 
         v_ok, v_reason = self.verify(tip, shadow)
+
         return {
             "ok": True,
             "message": msg,
@@ -469,4 +473,6 @@ class SyncEngine:
             "shadow": shadow,
             "verified": bool(v_ok),
             "verify_reason": v_reason,
+            "freecad_code": freecad_code,
+            "trace": freecad_code,
         }
