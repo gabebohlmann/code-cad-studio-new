@@ -7,6 +7,7 @@ A FreeCAD workbench for bidirectional sync between FreeCAD and a Build123d code 
   1. python -m uvicorn server.app:app --reload --host 127.0.0.1 --port 8000
 
 ## TODO
+  1. Add better mismatch/vertices checker for boolean operations
   1. Fix web ui
   1. Add a reload button to the code window 
   1. Add selectors to web, would require major rework of web. Currently just displays .stl, would need a .stl feature detector which is basically just reimplementing CAD
