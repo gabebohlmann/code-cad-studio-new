@@ -9,6 +9,7 @@ A FreeCAD workbench for bidirectional sync between FreeCAD and a Build123d code 
 ## TODO
   1. Fix web ui
   1. Add a reload button to the code window 
+  1. Add selectors to web, would require major rework of web. Currently just displays .stl, would need a .stl feature detector which is basically just reimplementing CAD
   1. Add strict type checking
   1. Check docstring correctness with ruff and pydoc lint
   1. Make server/app.py actually grab a real env var for FREECAD_CMD
