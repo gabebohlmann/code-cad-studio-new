@@ -7,23 +7,40 @@ from typing import Any
 
 def resolve_value(val_str: str, local_env: dict[str, Any]) -> float | None:
     """
-    Resolves a string value to a float, checking the local environment for variables.
+    Resolves a string value to a float.
 
-    Args:
-        val_str (str): The string to resolve (e.g., "10.0" or "L").
-        local_env (dict[str, Any]): Dictionary of local variables.
-
-    Returns:
-        float | None: The resolved float value, or None if unresolvable.
+    Supports:
+    - raw numbers: "10.0"
+    - variable names: "length"
+    - simple Python numeric expressions already valid in the executed build123d code:
+      "center_hole_dia / 2"
     """
+    if val_str is None:
+        return None
+
+    expr = str(val_str).strip()
+
     try:
-        return float(val_str)
+        return float(expr)
     except Exception:
-        if val_str in local_env:
-            try:
-                return float(local_env[val_str])
-            except Exception:
-                pass
+        pass
+
+    # The full code is already executed above for build123d/shadow validation,
+    # so evaluating numeric expressions here does not materially expand the
+    # parser's trust boundary. It simply lets the parser understand the same
+    # numeric expressions the user code already used.
+    try:
+        value = eval(expr, {"__builtins__": {}}, local_env)
+        return float(value)
+    except Exception:
+        pass
+
+    if expr in local_env:
+        try:
+            return float(local_env[expr])
+        except Exception:
+            pass
+
     return None
 
 
@@ -513,6 +530,150 @@ def _extract_boolean_expr(line: str, local_env: dict[str, Any]) -> dict[str, Any
         "right": right_info,
     }
 
+def _parse_assignment_line(line: str) -> tuple[str, str, str] | None:
+    """
+    Parse simple shape assignment lines.
+
+    Supports:
+        ex2 = Box(...)
+        ex2 -= Cylinder(...)
+        ex2 += Cylinder(...)
+        ex2 &= Cylinder(...)
+
+    Does not match tuple assignment like:
+        length, width, thickness = 80, 60, 10
+    """
+    stripped = line.strip()
+    m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*(\+=|-=|&=|=)\s*(.+?)\s*(?:#.*)?$", stripped)
+    if not m:
+        return None
+
+    lhs = m.group(1).strip()
+    op = m.group(2).strip()
+    rhs = m.group(3).strip()
+    return lhs, op, rhs
+
+
+def _block_is_empty(info: dict[str, Any] | None) -> bool:
+    """
+    Returns True if a parser block has not captured any real CAD operation.
+    """
+    if not info:
+        return True
+
+    return (
+        info.get("prim") is None
+        and info.get("bool") is None
+        and not info.get("mods")
+        and info.get("pos") is None
+    )
+
+
+def _choose_block_name_for_assignment(
+    current_name: str,
+    lhs: str,
+    blocks: dict[str, dict[str, Any]],
+) -> str:
+    """
+    Choose the FreeCAD object/block name for a shape assignment.
+
+    If there is no explicit # Block header and the parser is sitting on the
+    default CodePart block, use the user's shape variable name instead.
+
+    Example:
+        ex2 = Box(...)
+    becomes FreeCAD object:
+        ex2
+
+    But:
+        # MyBox
+        ex2 = Box(...)
+    still becomes:
+        MyBox
+    """
+    if (
+        current_name == "CodePart"
+        and lhs
+        and lhs != "part"
+        and current_name in blocks
+        and _block_is_empty(blocks[current_name])
+    ):
+        try:
+            blocks.pop(current_name, None)
+        except Exception:
+            pass
+
+        blocks[lhs] = _new_block()
+        return lhs
+
+    return current_name
+
+
+def _extract_boolean_rhs(rhs: str, local_env: dict[str, Any]) -> dict[str, Any] | None:
+    """
+    Extract a simple two-input boolean from a RHS expression.
+
+    Supports:
+        Box(...) + Cylinder(...)
+        Box(...) - Cylinder(...)
+        Box(...) & Cylinder(...)
+        Box(...) - Pos(...) * Cylinder(...)
+    """
+    op, left, right = _find_top_level_boolean_operator(rhs)
+    if op is None:
+        return None
+
+    left_info = _parse_placed_primitive_expr(left, local_env)
+    right_info = _parse_placed_primitive_expr(right, local_env)
+
+    if left_info is None or right_info is None:
+        return None
+
+    return {
+        "op": op,
+        "left": left_info,
+        "right": right_info,
+    }
+
+
+def _set_boolean_block(
+    blocks: dict[str, dict[str, Any]],
+    target_name: str,
+    op: str,
+    left_info: dict[str, Any],
+    right_info: dict[str, Any],
+) -> None:
+    """
+    Replace/create a target block as a native boolean result.
+
+    Creates/replaces:
+        <target>_Base
+        <target>_Tool
+        <target>
+    in that order, so the main processing loop creates the input primitives
+    before creating the boolean result.
+    """
+    base_name = f"{target_name}_Base"
+    tool_name = f"{target_name}_Tool"
+
+    bool_block = blocks.pop(target_name, _new_block())
+
+    blocks[base_name] = _new_block()
+    blocks[base_name]["prim"] = left_info["prim"]
+    blocks[base_name]["pos"] = left_info.get("pos")
+
+    blocks[tool_name] = _new_block()
+    blocks[tool_name]["prim"] = right_info["prim"]
+    blocks[tool_name]["pos"] = right_info.get("pos")
+
+    bool_block["prim"] = None
+    bool_block["bool"] = {
+        "op": op,
+        "base_name": base_name,
+        "tool_name": tool_name,
+    }
+
+    blocks[target_name] = bool_block
 
 def _boolean_type_id(op: str) -> str:
     if op == "+":
@@ -933,6 +1094,7 @@ def inject_code_to_freecad(full_code: str) -> tuple[bool, str]:
     lines = full_code.split("\n")
     current_name = None
     last_prim_name = None
+    shape_var_to_block = {}
 
     # For each block, collect the first primitive line, modifier lines,
     # and an optional Pos(...).
@@ -954,65 +1116,102 @@ def inject_code_to_freecad(full_code: str) -> tuple[bool, str]:
             if current_name not in blocks:
                 blocks[current_name] = _new_block()
 
-        # Boolean detection must happen before primitive detection.
-        # Otherwise `part = Box(...) - Cylinder(...)` gets mistaken for just Box.
-        bool_info = _extract_boolean_expr(line, local_env)
-        if bool_info is not None:
-            base_name = f"{current_name}_Base"
-            tool_name = f"{current_name}_Tool"
-
-            bool_block = blocks.pop(current_name, _new_block())
-
-            blocks[base_name] = _new_block()
-            blocks[base_name]["prim"] = bool_info["left"]["prim"]
-            blocks[base_name]["pos"] = bool_info["left"]["pos"]
-
-            blocks[tool_name] = _new_block()
-            blocks[tool_name]["prim"] = bool_info["right"]["prim"]
-            blocks[tool_name]["pos"] = bool_info["right"]["pos"]
-
-            bool_block["bool"] = {
-                "op": bool_info["op"],
-                "base_name": base_name,
-                "tool_name": tool_name,
-            }
-
-            blocks[current_name] = bool_block
-            continue
-
-                # Primitive detection.
+        # Assignment / algebra-mode detection.
         #
-        # Prefer the placed-expression parser first so this works:
-        #   part = Pos(5, 0, 0) * Cylinder(radius=3, height=10)
-        #
-        # The old parser saw Cylinder(...) and immediately continued, so Pos(...)
-        # on the same line was ignored.
-        matched_primitive = False
+        # Supports:
+        #   part = Box(...)
+        #   ex2 = Box(...)
+        #   ex2 = Box(...) - Cylinder(...)
+        #   ex2 -= Cylinder(...)
+        #   ex2 += Cylinder(...)
+        #   ex2 &= Cylinder(...)
+        assignment = _parse_assignment_line(line)
 
-        if "part" in line and "=" in line:
-            lhs, rhs = line.split("=", 1)
+        if assignment is not None:
+            lhs, assign_op, rhs = assignment
 
-            if lhs.strip() == "part":
+            # In-place booleans:
+            #   ex2 -= Cylinder(...)
+            #   ex2 += Cylinder(...)
+            #   ex2 &= Cylinder(...)
+            if assign_op in ("+=", "-=", "&="):
+                target_name = shape_var_to_block.get(lhs)
+
+                if not target_name and lhs in blocks:
+                    target_name = lhs
+
+                if target_name and target_name in blocks:
+                    right_info = _parse_placed_primitive_expr(rhs, local_env)
+
+                    # First version: support in-place boolean where the existing
+                    # target is still a primitive block.
+                    existing = blocks.get(target_name)
+                    if (
+                        right_info is not None
+                        and existing is not None
+                        and existing.get("prim") is not None
+                    ):
+                        left_info = {
+                            "prim": existing["prim"],
+                            "pos": existing.get("pos"),
+                        }
+
+                        op = {
+                            "+=": "+",
+                            "-=": "-",
+                            "&=": "&",
+                        }[assign_op]
+
+                        _set_boolean_block(
+                            blocks=blocks,
+                            target_name=target_name,
+                            op=op,
+                            left_info=left_info,
+                            right_info=right_info,
+                        )
+
+                        shape_var_to_block[lhs] = target_name
+                        current_name = target_name
+                        last_prim_name = target_name
+                        continue
+
+            # Direct assignment:
+            #   ex2 = Box(...)
+            #   ex2 = Pos(5, 0, 0) * Cylinder(...)
+            #   ex2 = Box(...) - Cylinder(...)
+            if assign_op == "=":
+                # Direct two-input boolean expression.
+                bool_info = _extract_boolean_rhs(rhs, local_env)
+                if bool_info is not None:
+                    target_name = _choose_block_name_for_assignment(current_name, lhs, blocks)
+                    current_name = target_name
+
+                    _set_boolean_block(
+                        blocks=blocks,
+                        target_name=target_name,
+                        op=bool_info["op"],
+                        left_info=bool_info["left"],
+                        right_info=bool_info["right"],
+                    )
+
+                    shape_var_to_block[lhs] = target_name
+                    last_prim_name = target_name
+                    continue
+
+                # Single primitive expression, optionally placed:
+                #   ex2 = Box(...)
+                #   ex2 = Pos(5, 0, 0) * Cylinder(...)
                 placed = _parse_placed_primitive_expr(rhs, local_env)
-
                 if placed is not None:
-                    blocks[current_name]["prim"] = placed["prim"]
-                    blocks[current_name]["pos"] = placed["pos"]
-                    last_prim_name = current_name
-                    matched_primitive = True
+                    target_name = _choose_block_name_for_assignment(current_name, lhs, blocks)
+                    current_name = target_name
 
-        if not matched_primitive:
-            for prim in ["Box", "Cylinder", "Sphere", "Cone", "Torus"]:
-                arg_str = _extract_call(line, prim)
-                if arg_str is not None and "part" in line and "=" in line:
-                    pos, kw = _parse_args_kwargs(arg_str)
-                    blocks[current_name]["prim"] = (prim, pos, kw)
-                    last_prim_name = current_name
-                    matched_primitive = True
-                    break
+                    blocks[target_name]["prim"] = placed["prim"]
+                    blocks[target_name]["pos"] = placed.get("pos")
 
-        if matched_primitive:
-            continue
+                    shape_var_to_block[lhs] = target_name
+                    last_prim_name = target_name
+                    continue
 
         # Modifier detection.
         #

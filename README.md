@@ -7,6 +7,15 @@ A FreeCAD workbench for bidirectional sync between FreeCAD and a Build123d code 
   1. python -m uvicorn server.app:app --reload --host 127.0.0.1 --port 8000
 
 ## TODO
+  1. Add variables in code to table in FC for better code to FC parsing
+  1. Add more robust variable tracking to code window. Part should be able to have other name than "part" and boolean ops should be able to handle any var combos in the algebra (currently requires shape declaration in equation like below)
+    ```
+    from build123d import *
+    length, width, thickness = 80.0, 60.0, 10.0
+    center_hole_dia = 22.0
+    c_h_r = center_hole_dia / 2
+    part = Box(length, width, thickness) - Cylinder(c_h_r, height=thickness)
+    ```
   1. Fix fillets on the default cut boolean snippet
   1. Add better mismatch/vertices checker for boolean operations
   1. Fix web ui
