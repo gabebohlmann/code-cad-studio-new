@@ -394,12 +394,37 @@ else:
             self.sel_lbl.setStyleSheet("background: #eee; padding: 6px;")
             tools_l.addWidget(self.sel_lbl)
             
-            # Shared code snippet buttons.
+                        # Shared code snippet buttons.
             # These mutate the editor text; the normal textChanged debounce then
             # applies code -> FreeCAD and updates the shadow.
             snippets_box = QtGui.QGroupBox("Insert Code")
             snippets_l = QtGui.QVBoxLayout()
             snippets_box.setLayout(snippets_l)
+
+            # This controls which shared snippet variant is inserted:
+            # - build123d: normal centered build123d-origin snippets
+            # - FreeCAD: FreeCAD-origin snippets when a snippet provides freecad_code
+            self.snippet_origin_mode = "b123d"
+
+            origin_row = QtGui.QHBoxLayout()
+            origin_row.addWidget(QtGui.QLabel("Snippet origin:"))
+
+            self.btn_snippet_origin_b123d = QtGui.QPushButton("build123d")
+            self.btn_snippet_origin_fc = QtGui.QPushButton("FreeCAD")
+
+            self.btn_snippet_origin_b123d.setCheckable(True)
+            self.btn_snippet_origin_fc.setCheckable(True)
+
+            self.btn_snippet_origin_b123d.clicked.connect(
+                lambda checked=False: self.set_snippet_origin_mode("b123d")
+            )
+            self.btn_snippet_origin_fc.clicked.connect(
+                lambda checked=False: self.set_snippet_origin_mode("freecad")
+            )
+
+            origin_row.addWidget(self.btn_snippet_origin_b123d)
+            origin_row.addWidget(self.btn_snippet_origin_fc)
+            snippets_l.addLayout(origin_row)
 
             grouped = {}
             for snip in SNIPPETS:
@@ -412,11 +437,16 @@ else:
                 for snip in snippets:
                     btn = QtGui.QPushButton(snip.label)
                     btn.clicked.connect(
-                        lambda checked=False, s=snip: self.insert_code_snippet(s.code, s.mode)
+                        lambda checked=False, s=snip: self.insert_code_snippet(
+                            self.snippet_code_for_origin(s),
+                            s.mode,
+                        )
                     )
                     row_l.addWidget(btn)
 
                 snippets_l.addLayout(row_l)
+
+            self.set_snippet_origin_mode("b123d")
 
             tools_l.addWidget(snippets_box)
 
@@ -923,6 +953,42 @@ else:
             # Apply pipeline
             self.perform_code_to_gui()
             self.refresh_tuner_ui()
+        
+        def set_snippet_origin_mode(self, mode: str):
+            """
+            Selects which shared snippet variant the local toolbar inserts.
+
+            This is separate from the existing origin toggle for the current
+            FreeCAD object. This only affects future snippet button inserts.
+            """
+            self.snippet_origin_mode = "freecad" if mode == "freecad" else "b123d"
+
+            try:
+                use_b123d = self.snippet_origin_mode == "b123d"
+
+                self.btn_snippet_origin_b123d.setChecked(use_b123d)
+                self.btn_snippet_origin_fc.setChecked(not use_b123d)
+
+                # Leave both clickable, but visually mark the active one.
+                self.btn_snippet_origin_b123d.setStyleSheet(
+                    "font-weight: bold;" if use_b123d else ""
+                )
+                self.btn_snippet_origin_fc.setStyleSheet(
+                    "font-weight: bold;" if not use_b123d else ""
+                )
+            except Exception:
+                pass
+
+        def snippet_code_for_origin(self, snip):
+            """
+            Returns the snippet code variant for the current snippet origin mode.
+            """
+            if self.snippet_origin_mode == "freecad":
+                fc_code = getattr(snip, "freecad_code", None)
+                if fc_code:
+                    return fc_code
+
+            return snip.code
 
         def insert_code_snippet(self, code: str, mode: str = "append"):
             """

@@ -31,17 +31,18 @@ class CodeSnippet:
         label: Button label shown in GUI/web.
         group: UI grouping label.
         mode: Whether the snippet replaces the editor or appends to it.
-        code: Python/build123d code to insert.
+        code: Default build123d-origin code.
+        freecad_code: Optional FreeCAD-origin code variant.
     """
     key: str
     label: str
     group: str
     mode: SnippetMode
     code: str
+    freecad_code: str | None = None
 
 
 HEADER = "from build123d import *\n\n"
-
 
 SNIPPETS: tuple[CodeSnippet, ...] = (
     CodeSnippet(
@@ -50,6 +51,7 @@ SNIPPETS: tuple[CodeSnippet, ...] = (
         group="Primitives",
         mode="replace",
         code=HEADER + "# Box\npart = Box(10, 10, 10)\n",
+        freecad_code=HEADER + "# Box\npart = Box(10, 10, 10, align=(Align.MIN, Align.MIN, Align.MIN))\n",
     ),
     CodeSnippet(
         key="cylinder",
@@ -57,6 +59,7 @@ SNIPPETS: tuple[CodeSnippet, ...] = (
         group="Primitives",
         mode="replace",
         code=HEADER + "# Cylinder\npart = Cylinder(radius=5, height=10)\n",
+        freecad_code=HEADER + "# Cylinder\npart = Cylinder(radius=5, height=10, align=(Align.CENTER, Align.CENTER, Align.MIN))\n",
     ),
     CodeSnippet(
         key="sphere",
@@ -64,6 +67,7 @@ SNIPPETS: tuple[CodeSnippet, ...] = (
         group="Primitives",
         mode="replace",
         code=HEADER + "# Sphere\npart = Sphere(radius=5)\n",
+        freecad_code=HEADER + "# Sphere\npart = Sphere(radius=5)\n",
     ),
     CodeSnippet(
         key="cone",
@@ -71,6 +75,7 @@ SNIPPETS: tuple[CodeSnippet, ...] = (
         group="Primitives",
         mode="replace",
         code=HEADER + "# Cone\npart = Cone(bottom_radius=2, top_radius=4, height=10)\n",
+        freecad_code=HEADER + "# Cone\npart = Cone(bottom_radius=2, top_radius=4, height=10, align=(Align.CENTER, Align.CENTER, Align.MIN))\n",
     ),
     CodeSnippet(
         key="torus",
@@ -78,6 +83,7 @@ SNIPPETS: tuple[CodeSnippet, ...] = (
         group="Primitives",
         mode="replace",
         code=HEADER + "# Torus\npart = Torus(major_radius=10, minor_radius=2)\n",
+        freecad_code=HEADER + "# Torus\npart = Torus(major_radius=10, minor_radius=2)\n",
     ),
     CodeSnippet(
         key="tube",
@@ -91,7 +97,67 @@ SNIPPETS: tuple[CodeSnippet, ...] = (
             + "inner = Cylinder(radius=2, height=10)\n"
             + "part = outer - inner\n"
         ),
+        freecad_code=(
+            HEADER
+            + "# Tube\n"
+            + "outer = Cylinder(radius=5, height=10, align=(Align.CENTER, Align.CENTER, Align.MIN))\n"
+            + "inner = Cylinder(radius=2, height=10, align=(Align.CENTER, Align.CENTER, Align.MIN))\n"
+            + "part = outer - inner\n"
+        ),
     ),
+
+    CodeSnippet(
+        key="boolean_fuse",
+        label="Fuse",
+        group="Booleans",
+        mode="replace",
+        code=(
+            HEADER
+            + "# Fuse\n"
+            + "part = Box(10, 10, 10) + Pos(5, 0, 0) * Cylinder(radius=3, height=10)\n"
+        ),
+        freecad_code=(
+            HEADER
+            + "# Fuse\n"
+            + "part = Box(10, 10, 10, align=(Align.MIN, Align.MIN, Align.MIN)) "
+            + "+ Pos(10, 5, 0) * Cylinder(radius=3, height=10, align=(Align.CENTER, Align.CENTER, Align.MIN))\n"
+        ),
+    ),
+    CodeSnippet(
+        key="boolean_cut",
+        label="Cut",
+        group="Booleans",
+        mode="replace",
+        code=(
+            HEADER
+            + "# Cut\n"
+            + "part = Box(10, 10, 10) - Cylinder(radius=3, height=12)\n"
+        ),
+        freecad_code=(
+            HEADER
+            + "# Cut\n"
+            + "part = Box(10, 10, 10, align=(Align.MIN, Align.MIN, Align.MIN)) "
+            + "- Pos(5, 5, -1) * Cylinder(radius=3, height=12, align=(Align.CENTER, Align.CENTER, Align.MIN))\n"
+        ),
+    ),
+    CodeSnippet(
+        key="boolean_common",
+        label="Common",
+        group="Booleans",
+        mode="replace",
+        code=(
+            HEADER
+            + "# Common\n"
+            + "part = Box(10, 10, 10) & Pos(3, 0, 0) * Sphere(radius=5)\n"
+        ),
+        freecad_code=(
+            HEADER
+            + "# Common\n"
+            + "part = Box(10, 10, 10, align=(Align.MIN, Align.MIN, Align.MIN)) "
+            + "& Pos(5, 5, 0) * Cylinder(radius=3, height=10, align=(Align.CENTER, Align.CENTER, Align.MIN))\n"
+        ),
+    ),
+
     CodeSnippet(
         key="fillet_all_edges",
         label="Fillet edges",

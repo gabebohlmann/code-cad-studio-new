@@ -839,6 +839,62 @@ def _remove_stale_codecad_modifiers(doc, keep_names: set[str]) -> bool:
 
     return removed_any
 
+def _primitive_uses_freecad_origin(prim_type: str, kw: dict[str, str]) -> bool:
+    """
+    Detect whether a primitive line explicitly asks for FreeCAD-style origin.
+
+    build123d default origin:
+      Box centered, Cylinder centered vertically, Cone centered vertically.
+
+    FreeCAD Part Workbench origin:
+      Box min corner at origin.
+      Cylinder/Cone bottom face centered on origin.
+    """
+    align = kw.get("align")
+    if not align:
+        return False
+
+    compact = re.sub(r"\s+", "", align)
+
+    if prim_type == "Box":
+        return compact == "(Align.MIN,Align.MIN,Align.MIN)"
+
+    if prim_type in {"Cylinder", "Cone"}:
+        return compact == "(Align.CENTER,Align.CENTER,Align.MIN)"
+
+    return False
+
+def _clear_b123d_origin(obj: Any) -> bool:
+    """
+    Converts a CodeCAD-managed primitive back to FreeCAD-origin placement.
+
+    This undoes the placement offset previously applied by
+    _apply_b123d_origin_for_new_object().
+    """
+    if obj is None or not hasattr(obj, "Placement"):
+        return False
+
+    _ensure_codecad_props(obj)
+
+    if not bool(getattr(obj, "CodeCAD_UseB123dOrigin", False)):
+        return False
+
+    old_delta = getattr(obj, "CodeCAD_OriginDelta", FreeCAD.Base.Vector(0, 0, 0))
+
+    try:
+        rot = obj.Placement.Rotation
+        delta_world = rot.multVec(old_delta)
+    except Exception:
+        delta_world = old_delta
+
+    try:
+        obj.Placement.Base = obj.Placement.Base.add(delta_world)
+        obj.CodeCAD_UseB123dOrigin = False
+        obj.CodeCAD_OriginDelta = FreeCAD.Base.Vector(0, 0, 0)
+        return True
+    except Exception:
+        return False
+
 def inject_code_to_freecad(full_code: str) -> tuple[bool, str]:
     """
     Parses code to find primitive calls and updates existing FreeCAD objects.
@@ -1097,6 +1153,7 @@ def inject_code_to_freecad(full_code: str) -> tuple[bool, str]:
 
         prim_type, pos_args, kw = prim
         pos_vec = info["pos"]
+        use_freecad_origin = _primitive_uses_freecad_origin(prim_type, kw)
 
         obj = doc.getObject(name)
 
@@ -1239,7 +1296,7 @@ def inject_code_to_freecad(full_code: str) -> tuple[bool, str]:
                 obj.Angle3 = float(ma)
                 changed_this_obj = True
 
-                # If created from code, or if this line explicitly uses build123d placement,
+        # If created from code, or if this line explicitly uses build123d placement,
         # align the native FreeCAD primitive to build123d's centered-origin behavior.
         #
         # This is required for:
@@ -1247,7 +1304,10 @@ def inject_code_to_freecad(full_code: str) -> tuple[bool, str]:
         #
         # because build123d places the cylinder's own origin at (5, 0, 0), while
         # FreeCAD's Part::Cylinder Placement.Base is at the bottom-center by default.
-        if created and (code_first or pos_vec is not None):
+        if use_freecad_origin:
+            if _clear_b123d_origin(obj):
+                changed_this_obj = True
+        elif created and (code_first or pos_vec is not None):
             _apply_b123d_origin_for_new_object(obj)
             changed_this_obj = True
 

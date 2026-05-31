@@ -22,6 +22,35 @@ const elSnippetToolbar = document.getElementById("snippetToolbar");
 const btnPreview = document.getElementById("renderPreview");
 const btnFinal = document.getElementById("renderFinal");
 const btnClearLog = document.getElementById("clearLog");
+const btnOriginB123d = document.getElementById("originB123d");
+const btnOriginFreeCAD = document.getElementById("originFreeCAD");
+
+let originMode = localStorage.getItem("codecadOriginMode") || "b123d";
+
+function setOriginMode(mode) {
+  originMode = mode === "freecad" ? "freecad" : "b123d";
+  localStorage.setItem("codecadOriginMode", originMode);
+
+  if (btnOriginB123d) {
+    btnOriginB123d.classList.toggle("active", originMode === "b123d");
+  }
+
+  if (btnOriginFreeCAD) {
+    btnOriginFreeCAD.classList.toggle("active", originMode === "freecad");
+  }
+
+  log(`origin mode: ${originMode === "freecad" ? "FreeCAD" : "build123d"}`);
+}
+
+function snippetCodeForOrigin(snip) {
+  if (!snip) return "";
+
+  if (originMode === "freecad" && snip.freecad_code) {
+    return snip.freecad_code;
+  }
+
+  return snip.code || "";
+}
 
 /**
  * Appends a line of text to the on-screen log console.
@@ -258,15 +287,18 @@ function appendCodeAtBottom(code) {
 }
 
 function insertSnippet(snip) {
-  if (!snip || !snip.code) return;
+  if (!snip) return;
+
+  const code = snippetCodeForOrigin(snip);
+  if (!code) return;
 
   if (snip.mode === "replace") {
-    elCode.value = String(snip.code).trimEnd() + "\n";
+    elCode.value = String(code).trimEnd() + "\n";
     moveCodeCursorToBottom();
     return;
   }
 
-  appendCodeAtBottom(snip.code);
+  appendCodeAtBottom(code);
 }
 
 async function loadSnippets() {
@@ -368,6 +400,16 @@ async function render(mesh_quality) {
 }
 
 loadSnippets();
+setOriginMode(originMode);
+
+if (btnOriginB123d) {
+  btnOriginB123d.addEventListener("click", () => setOriginMode("b123d"));
+}
+
+if (btnOriginFreeCAD) {
+  btnOriginFreeCAD.addEventListener("click", () => setOriginMode("freecad"));
+}
+
 elCode.addEventListener("click", moveCodeCursorToBottom);
 btnPreview.addEventListener("click", () => render("preview"));
 btnFinal.addEventListener("click", () => render("final"));
