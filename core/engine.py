@@ -47,17 +47,15 @@ class SyncEngine:
 
     def find_tip_object(self, doc=None):
         """
-        Locates the 'Tip' (terminal) object in the document dependency graph.
+        Locates the terminal Part object in the document dependency graph.
 
-        The 'Tip' is essentially the final result of the modeling operations.
-        It heuristicly filters for 'Part::' objects that are not parents of 
-        any other object.
+        The tip is the final result object, not an input/base/tool object.
 
-        Args:
-            doc (App.Document, optional): The document to search. Defaults to active doc.
-
-        Returns:
-            object | None: The FreeCAD DocumentObject representing the tip, or None.
+        Important for booleans:
+            Part::Cut / Part::Fuse / Part::Common use both Base and Tool.
+            If Tool is not marked as a parent/input, the boolean tool object can be
+            incorrectly selected as the tip, causing verifier errors like:
+                Vertex count 2 vs 10
         """
         doc = doc or self.api.active_doc()
         if not doc:
@@ -65,28 +63,80 @@ class SyncEngine:
 
         candidates = set()
         for obj in doc.Objects:
-            if obj.Name != "Build123d_Shadow" and obj.TypeId.startswith("Part::"):
+            if obj.Name == "Build123d_Shadow":
+                continue
+            if getattr(obj, "TypeId", "").startswith("Part::"):
                 candidates.add(obj)
 
         if not candidates:
             return None
 
         parents = set()
-        for obj in candidates:
-            if hasattr(obj, "Base"):
-                if isinstance(obj.Base, (list, tuple)):
-                    for i in obj.Base:
-                        if hasattr(i, "Name"):
-                            parents.add(i)
-                else:
-                    parents.add(obj.Base)
 
-            if hasattr(obj, "EdgeLinks") and isinstance(obj.EdgeLinks, tuple) and len(obj.EdgeLinks) > 0:
-                if hasattr(obj.EdgeLinks[0], "Name"):
-                    parents.add(obj.EdgeLinks[0])
+        def add_parent_ref(ref):
+            """
+            Add document object references found in dependency properties.
+
+            Handles:
+                obj
+                (obj, subelements)
+                [obj1, obj2]
+                nested tuples/lists
+            """
+            if ref is None:
+                return
+
+            if hasattr(ref, "Name"):
+                parents.add(ref)
+                return
+
+            if isinstance(ref, (list, tuple)):
+                for item in ref:
+                    add_parent_ref(item)
+
+        for obj in candidates:
+            # Modifier chains and many Part features.
+            if hasattr(obj, "Base"):
+                add_parent_ref(getattr(obj, "Base"))
+
+            # Boolean operations: Part::Cut, Part::Fuse, Part::Common.
+            if hasattr(obj, "Tool"):
+                add_parent_ref(getattr(obj, "Tool"))
+
+            # Some compound/multi-boolean style objects may use Shapes.
+            if hasattr(obj, "Shapes"):
+                add_parent_ref(getattr(obj, "Shapes"))
+
+            # Existing selector/link-based relationship support.
+            if hasattr(obj, "EdgeLinks"):
+                add_parent_ref(getattr(obj, "EdgeLinks"))
 
         leaves = [c for c in candidates if c not in parents]
-        return leaves[-1] if leaves else None
+
+        if not leaves:
+            return None
+
+        # Prefer visible leaves. Hidden base/tool inputs should not usually be the
+        # active modeling result, but do not hard-require visibility because users
+        # may temporarily hide the result for inspection.
+        visible_leaves = []
+        for obj in leaves:
+            try:
+                if bool(getattr(obj, "Visibility", True)):
+                    visible_leaves.append(obj)
+            except Exception:
+                visible_leaves.append(obj)
+
+        leaves_to_use = visible_leaves or leaves
+
+        # Prefer CodeCAD-managed terminal features when present.
+        for obj in reversed(leaves_to_use):
+            if bool(getattr(obj, "CodeCAD_ManagedModifier", False)):
+                return obj
+            if bool(getattr(obj, "CodeCAD_ManagedBoolean", False)):
+                return obj
+
+        return leaves_to_use[-1]
 
     def code_from_tip(self, tip_obj):
         """
