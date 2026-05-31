@@ -399,7 +399,7 @@ else:
             self.sel_lbl.setStyleSheet("background: #eee; padding: 6px;")
             tools_l.addWidget(self.sel_lbl)
             
-                        # Shared code snippet buttons.
+            # Shared code snippet buttons.
             # These mutate the editor text; the normal textChanged debounce then
             # applies code -> FreeCAD and updates the shadow.
             snippets_box = QtGui.QGroupBox("Insert Code")
@@ -480,6 +480,23 @@ else:
             l1.addWidget(self.status)
 
             self.tabs.addTab(t1, "Editor")
+
+            # -------------------------
+            # FREECAD CMD TAB
+            # -------------------------
+            t_cmd = QtGui.QWidget()
+            cmd_l = QtGui.QVBoxLayout()
+            t_cmd.setLayout(cmd_l)
+
+            self.fc_cmd_editor = QtGui.QPlainTextEdit()
+            self.fc_cmd_editor.setReadOnly(True)
+            self.fc_cmd_editor.setFont(QtGui.QFont("Courier New", 10))
+            self.fc_cmd_editor.setPlainText(
+                "# FreeCAD command trace will appear here after Code → GUI sync.\n"
+            )
+            cmd_l.addWidget(self.fc_cmd_editor)
+
+            self.tabs.addTab(t_cmd, "FreeCAD Cmd")
 
             # -------------------------
             # TUNER TAB
@@ -733,6 +750,7 @@ else:
             self.programmatic_update = True
             try:
                 result = self.engine.apply_pipeline(code, make_shadow=True, verify=False)
+                self.update_fc_cmd_view(result.get("freecad_code") or result.get("trace"))
             finally:
                 # keep programmatic_update true a moment longer in case FreeCAD fires late change notifications
                 QtCore.QTimer.singleShot(250, self._end_programmatic_update)
@@ -1061,6 +1079,22 @@ else:
             # which triggers GUI->Code. That's fine here because origin toggle is a GUI-driven change.
             self.perform_gui_to_code()
             self.update_origin_button_label()
+        
+        def update_fc_cmd_view(self, text: str | None):
+            """
+            Updates the read-only FreeCAD command trace tab.
+            """
+            try:
+                if not text:
+                    text = "# No FreeCAD command trace available.\n"
+
+                self.fc_cmd_editor.blockSignals(True)
+                try:
+                    self.fc_cmd_editor.setPlainText(text)
+                finally:
+                    self.fc_cmd_editor.blockSignals(False)
+            except Exception:
+                pass
 
     # -----------------------------------------------------------------------------
     # WORKBENCH LAUNCHER

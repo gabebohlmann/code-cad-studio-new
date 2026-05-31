@@ -909,6 +909,7 @@ def _apply_native_modifier(
     base_name: str,
     index: int,
     local_env: dict[str, Any],
+    trace: list[str] | None = None,
 ) -> tuple[Any, bool, str | None]:
     """
     Applies one build123d modifier line as a native FreeCAD modifier object.
@@ -963,6 +964,9 @@ def _apply_native_modifier(
         mod_obj.touch()
     except Exception:
         pass
+
+    _trace_visibility(trace, base_obj, False)
+    _trace_object_state(trace, mod_obj, f"{mod_name} ({mod_type})")
 
     return mod_obj, changed, None
 
@@ -1056,7 +1060,146 @@ def _clear_b123d_origin(obj: Any) -> bool:
     except Exception:
         return False
 
-def inject_code_to_freecad(full_code: str) -> tuple[bool, str]:
+def _trace_add(trace: list[str] | None, line: str = "") -> None:
+    """
+    Append a line to the FreeCAD API trace.
+    """
+    if trace is not None:
+        trace.append(line)
+
+
+def _trace_q(value: Any) -> float:
+    """
+    Convert a FreeCAD quantity/property or plain value to float for trace output.
+    """
+    try:
+        return float(value.Value)
+    except Exception:
+        try:
+            return float(value)
+        except Exception:
+            return 0.0
+
+
+def _trace_vec(v: Any) -> str:
+    """
+    Format a FreeCAD vector as App.Vector(x, y, z).
+    """
+    try:
+        return f"App.Vector({float(v.x)!r}, {float(v.y)!r}, {float(v.z)!r})"
+    except Exception:
+        return "App.Vector(0.0, 0.0, 0.0)"
+
+
+def _trace_visibility(trace: list[str] | None, obj: Any, visible: bool) -> None:
+    """
+    Trace object visibility assignment.
+    """
+    if obj is None:
+        return
+
+    try:
+        _trace_add(trace, f'doc.getObject("{obj.Name}").Visibility = {bool(visible)!r}')
+    except Exception:
+        pass
+
+
+def _trace_object_state(trace: list[str] | None, obj: Any, comment: str | None = None) -> None:
+    """
+    Append an equivalent FreeCAD Python/API representation of an object's current state.
+
+    This is a debug trace, not a separate execution path. It shows what CodeCAD's
+    parser has mapped the build123d code into on the FreeCAD side.
+    """
+    if trace is None or obj is None:
+        return
+
+    name = getattr(obj, "Name", "Object")
+    type_id = getattr(obj, "TypeId", "")
+
+    _trace_add(trace)
+    _trace_add(trace, f"# {comment or name}")
+    _trace_add(trace, f'obj = doc.getObject("{name}")')
+    _trace_add(trace, f'if obj is None: obj = doc.addObject("{type_id}", "{name}")')
+
+    if type_id == "Part::Box":
+        _trace_add(trace, f"obj.Length.Value = {_trace_q(obj.Length)!r}")
+        _trace_add(trace, f"obj.Width.Value = {_trace_q(obj.Width)!r}")
+        _trace_add(trace, f"obj.Height.Value = {_trace_q(obj.Height)!r}")
+
+    elif type_id == "Part::Cylinder":
+        _trace_add(trace, f"obj.Radius.Value = {_trace_q(obj.Radius)!r}")
+        _trace_add(trace, f"obj.Height.Value = {_trace_q(obj.Height)!r}")
+        try:
+            _trace_add(trace, f"obj.Angle = {float(obj.Angle)!r}")
+        except Exception:
+            pass
+
+    elif type_id == "Part::Sphere":
+        _trace_add(trace, f"obj.Radius.Value = {_trace_q(obj.Radius)!r}")
+        for prop in ("Angle1", "Angle2", "Angle3"):
+            try:
+                _trace_add(trace, f"obj.{prop} = {float(getattr(obj, prop))!r}")
+            except Exception:
+                pass
+
+    elif type_id == "Part::Cone":
+        _trace_add(trace, f"obj.Radius1.Value = {_trace_q(obj.Radius1)!r}")
+        _trace_add(trace, f"obj.Radius2.Value = {_trace_q(obj.Radius2)!r}")
+        _trace_add(trace, f"obj.Height.Value = {_trace_q(obj.Height)!r}")
+        try:
+            _trace_add(trace, f"obj.Angle = {float(obj.Angle)!r}")
+        except Exception:
+            pass
+
+    elif type_id == "Part::Torus":
+        _trace_add(trace, f"obj.Radius1.Value = {_trace_q(obj.Radius1)!r}")
+        _trace_add(trace, f"obj.Radius2.Value = {_trace_q(obj.Radius2)!r}")
+        for prop in ("Angle1", "Angle2", "Angle3"):
+            try:
+                _trace_add(trace, f"obj.{prop} = {float(getattr(obj, prop))!r}")
+            except Exception:
+                pass
+
+    elif type_id in ("Part::Fuse", "Part::Cut", "Part::Common"):
+        try:
+            base = getattr(obj, "Base", None)
+            if base:
+                _trace_add(trace, f'obj.Base = doc.getObject("{base.Name}")')
+        except Exception:
+            pass
+
+        try:
+            tool = getattr(obj, "Tool", None)
+            if tool:
+                _trace_add(trace, f'obj.Tool = doc.getObject("{tool.Name}")')
+        except Exception:
+            pass
+
+    elif type_id in ("Part::Fillet", "Part::Chamfer"):
+        try:
+            base = _current_base(obj)
+            if base:
+                _trace_add(trace, f'obj.Base = doc.getObject("{base.Name}")')
+        except Exception:
+            pass
+
+        try:
+            _trace_add(trace, f"obj.Edges = {list(obj.Edges)!r}")
+        except Exception:
+            pass
+
+    try:
+        _trace_add(trace, f"obj.Placement.Base = {_trace_vec(obj.Placement.Base)}")
+    except Exception:
+        pass
+
+    try:
+        _trace_add(trace, f"obj.Visibility = {bool(obj.Visibility)!r}")
+    except Exception:
+        pass
+
+def inject_code_to_freecad(full_code: str, trace: list[str] | None = None) -> tuple[bool, str]:
     """
     Parses code to find primitive calls and updates existing FreeCAD objects.
 
@@ -1071,6 +1214,15 @@ def inject_code_to_freecad(full_code: str) -> tuple[bool, str]:
     Returns:
         tuple[bool, str]: (Success boolean, Status message).
     """
+    if trace is None:
+        trace = []
+
+    trace.append("import FreeCAD as App")
+    trace.append("")
+    trace.append("doc = App.ActiveDocument")
+    trace.append("")
+    trace.append("# CodeCAD generated FreeCAD API trace")
+    trace.append("")
     doc = FreeCAD.ActiveDocument
     if not doc:
         return False, "No Document"
@@ -1320,6 +1472,10 @@ def inject_code_to_freecad(full_code: str) -> tuple[bool, str]:
             _set_object_visible(tool_obj, False)
             _set_object_visible(obj, True)
 
+            _trace_visibility(trace, base_obj, False)
+            _trace_visibility(trace, tool_obj, False)
+            _trace_object_state(trace, obj, f"{name} boolean result")
+
             try:
                 obj.touch()
             except Exception:
@@ -1337,6 +1493,7 @@ def inject_code_to_freecad(full_code: str) -> tuple[bool, str]:
                     base_name=name,
                     index=mod_index,
                     local_env=local_env,
+                    trace=trace,
                 )
 
                 if err:
@@ -1545,6 +1702,7 @@ def inject_code_to_freecad(full_code: str) -> tuple[bool, str]:
                 base_name=name,
                 index=mod_index,
                 local_env=local_env,
+                trace=trace,
             )
 
             if err:
@@ -1555,6 +1713,8 @@ def inject_code_to_freecad(full_code: str) -> tuple[bool, str]:
         
         if not info.get("mods"):
             _set_object_visible(obj, True)
+
+        _trace_object_state(trace, obj, f"{name} primitive")
 
         if created or changed_this_obj:
             changes_made = True
@@ -1573,6 +1733,9 @@ def inject_code_to_freecad(full_code: str) -> tuple[bool, str]:
         changes_made = True
 
     if changes_made:
+        _trace_add(trace)
+        _trace_add(trace, "doc.recompute()")
+
         try:
             doc.recompute()
         except Exception:
@@ -1584,6 +1747,8 @@ def inject_code_to_freecad(full_code: str) -> tuple[bool, str]:
                 refreshed_any = True
 
         if refreshed_any:
+            _trace_add(trace, "doc.recompute()  # after origin refresh")
+
             try:
                 doc.recompute()
             except Exception:
