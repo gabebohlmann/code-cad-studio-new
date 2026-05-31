@@ -288,30 +288,92 @@ def _refresh_b123d_origin_after_param_change(obj: Any) -> bool:
 
 def _parse_pos_transform(line: str, local_env: dict[str, Any]) -> FreeCAD.Base.Vector | None:
     """
-    Parses a `Pos(x, y, z)` transformation from a line of code.
+    Parses a `Pos(...)` transformation from a line of code.
 
-    Expected format matches regex: `Pos(...)`.
+    Supports:
+        Pos(5, 0, 0)
+        Pos(5, 0)
+        Pos(X=5)
+        Pos(Y=2, Z=4)
 
-    Args:
-        line (str): The line of code containing the transformation.
-        local_env (dict): Dictionary used to resolve variable names to values.
-
-    Returns:
-        FreeCAD.Base.Vector | None: The translation vector, or None if not found/invalid.
+    Missing coordinates default to 0, matching common build123d Pos usage.
     """
-    m = re.search(r"Pos\s*\(\s*([^\)]+)\)", line)
+    m = re.search(r"Pos\s*\(", line)
     if not m:
         return None
-    inside = m.group(1)
-    parts = _split_args(inside)
-    if len(parts) < 3:
+
+    start = m.end() - 1
+    depth = 0
+    end = None
+
+    for i in range(start, len(line)):
+        ch = line[i]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+
+    if end is None:
         return None
-    x = resolve_value(parts[0], local_env)
-    y = resolve_value(parts[1], local_env)
-    z = resolve_value(parts[2], local_env)
-    if x is None or y is None or z is None:
-        return None
+
+    inside = line[start + 1 : end]
+    pos_args, kw = _parse_args_kwargs(inside)
+
+    def rv(raw, default=0.0):
+        if raw is None:
+            return default
+        val = resolve_value(raw, local_env)
+        return default if val is None else float(val)
+
+    x = rv(pos_args[0], 0.0) if len(pos_args) > 0 else rv(kw.get("X") or kw.get("x"), 0.0)
+    y = rv(pos_args[1], 0.0) if len(pos_args) > 1 else rv(kw.get("Y") or kw.get("y"), 0.0)
+    z = rv(pos_args[2], 0.0) if len(pos_args) > 2 else rv(kw.get("Z") or kw.get("z"), 0.0)
+
     return FreeCAD.Base.Vector(float(x), float(y), float(z))
+
+def _set_b123d_position(obj: Any, pos_vec: FreeCAD.Base.Vector) -> bool:
+    """
+    Sets a FreeCAD object's placement so its build123d-style origin lands at pos_vec.
+
+    For CodeCAD/build123d-origin objects, Placement.Base is not the visual center;
+    Placement.Base is offset by CodeCAD_OriginDelta. So:
+
+        visual/build123d origin = Placement.Base + rotated(CodeCAD_OriginDelta)
+
+    This helper sets Placement.Base such that the visual/build123d origin equals pos_vec.
+    """
+    if obj is None or pos_vec is None or not hasattr(obj, "Placement"):
+        return False
+
+    _ensure_codecad_props(obj)
+
+    try:
+        use_b123d_origin = bool(getattr(obj, "CodeCAD_UseB123dOrigin", False))
+    except Exception:
+        use_b123d_origin = False
+
+    target_base = pos_vec
+
+    if use_b123d_origin:
+        try:
+            delta = getattr(obj, "CodeCAD_OriginDelta", FreeCAD.Base.Vector(0, 0, 0))
+            rot = obj.Placement.Rotation
+            delta_world = rot.multVec(delta)
+            target_base = pos_vec.sub(delta_world)
+        except Exception:
+            target_base = pos_vec
+
+    try:
+        if obj.Placement.Base.distanceToPoint(target_base) > 1e-6:
+            obj.Placement.Base = target_base
+            return True
+    except Exception:
+        pass
+
+    return False
 
 
 def _extract_balanced_call_at_start(expr: str, func_name: str) -> tuple[str | None, str]:
@@ -387,22 +449,17 @@ def _parse_placed_primitive_expr(expr: str, local_env: dict[str, Any]) -> dict[s
         Box(10, 10, 10)
         Cylinder(radius=3, height=10)
         Pos(5, 0, 0) * Cylinder(radius=3, height=10)
+        Pos(X=5) * Cylinder(radius=3, height=10)
     """
     s = expr.strip()
     pos_vec = None
 
     if s.startswith("Pos("):
+        pos_vec = _parse_pos_transform(s, local_env)
+
         pos_args, rest = _extract_balanced_call_at_start(s, "Pos")
         if pos_args is None:
             return None
-
-        parts = _split_args(pos_args)
-        if len(parts) >= 3:
-            x = resolve_value(parts[0], local_env)
-            y = resolve_value(parts[1], local_env)
-            z = resolve_value(parts[2], local_env)
-            if x is not None and y is not None and z is not None:
-                pos_vec = FreeCAD.Base.Vector(float(x), float(y), float(z))
 
         rest = rest.strip()
         if rest.startswith("*"):
@@ -867,16 +924,36 @@ def inject_code_to_freecad(full_code: str) -> tuple[bool, str]:
             blocks[current_name] = bool_block
             continue
 
-        # Primitive detection
+                # Primitive detection.
+        #
+        # Prefer the placed-expression parser first so this works:
+        #   part = Pos(5, 0, 0) * Cylinder(radius=3, height=10)
+        #
+        # The old parser saw Cylinder(...) and immediately continued, so Pos(...)
+        # on the same line was ignored.
         matched_primitive = False
-        for prim in ["Box", "Cylinder", "Sphere", "Cone", "Torus"]:
-            arg_str = _extract_call(line, prim)
-            if arg_str is not None and "part" in line and "=" in line:
-                pos, kw = _parse_args_kwargs(arg_str)
-                blocks[current_name]["prim"] = (prim, pos, kw)
-                last_prim_name = current_name
-                matched_primitive = True
-                break
+
+        if "part" in line and "=" in line:
+            lhs, rhs = line.split("=", 1)
+
+            if lhs.strip() == "part":
+                placed = _parse_placed_primitive_expr(rhs, local_env)
+
+                if placed is not None:
+                    blocks[current_name]["prim"] = placed["prim"]
+                    blocks[current_name]["pos"] = placed["pos"]
+                    last_prim_name = current_name
+                    matched_primitive = True
+
+        if not matched_primitive:
+            for prim in ["Box", "Cylinder", "Sphere", "Cone", "Torus"]:
+                arg_str = _extract_call(line, prim)
+                if arg_str is not None and "part" in line and "=" in line:
+                    pos, kw = _parse_args_kwargs(arg_str)
+                    blocks[current_name]["prim"] = (prim, pos, kw)
+                    last_prim_name = current_name
+                    matched_primitive = True
+                    break
 
         if matched_primitive:
             continue
@@ -1162,24 +1239,43 @@ def inject_code_to_freecad(full_code: str) -> tuple[bool, str]:
                 obj.Angle3 = float(ma)
                 changed_this_obj = True
 
-        # Placement translation if present
-        if pos_vec is not None and hasattr(obj, "Placement"):
-            if obj.Placement.Base.distanceToPoint(pos_vec) > 1e-6:
-                obj.Placement.Base = pos_vec
-                changed_this_obj = True
-
-        # If created in code-first mode, default to build123d origin
-        if created and code_first:
+                # If created from code, or if this line explicitly uses build123d placement,
+        # align the native FreeCAD primitive to build123d's centered-origin behavior.
+        #
+        # This is required for:
+        #   part = Pos(5, 0, 0) * Cylinder(radius=3, height=10)
+        #
+        # because build123d places the cylinder's own origin at (5, 0, 0), while
+        # FreeCAD's Part::Cylinder Placement.Base is at the bottom-center by default.
+        if created and (code_first or pos_vec is not None):
             _apply_b123d_origin_for_new_object(obj)
             changed_this_obj = True
 
         _ensure_codecad_props(obj)
+
+        # If an existing build123d-origin object changed dimensions, refresh its
+        # origin delta before applying Pos(...). Otherwise height/radius changes can
+        # leave the visual center offset incorrectly.
         if (
             bool(getattr(obj, "CodeCAD_UseB123dOrigin", False))
             and changed_this_obj
-            and pos_vec is None
+            and not created
         ):
-            origin_refresh_list.append(obj)
+            if pos_vec is not None:
+                if _refresh_b123d_origin_after_param_change(obj):
+                    changed_this_obj = True
+            else:
+                origin_refresh_list.append(obj)
+
+        # Placement translation if present.
+        # Use build123d-aware placement, not raw FreeCAD Placement.Base.
+        if pos_vec is not None and hasattr(obj, "Placement"):
+            if not bool(getattr(obj, "CodeCAD_UseB123dOrigin", False)):
+                _apply_b123d_origin_for_new_object(obj)
+                changed_this_obj = True
+
+            if _set_b123d_position(obj, pos_vec):
+                changed_this_obj = True
 
         chain_tip = obj
         for mod_index, mod in enumerate(info.get("mods", []), start=1):
