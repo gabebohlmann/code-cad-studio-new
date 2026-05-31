@@ -7,6 +7,7 @@ A FreeCAD workbench for bidirectional sync between FreeCAD and a Build123d code 
   1. python -m uvicorn server.app:app --reload --host 127.0.0.1 --port 8000
 
 ## TODO
+  1. Fix fillets on the default cut boolean snippet
   1. Add better mismatch/vertices checker for boolean operations
   1. Fix web ui
   1. Add a reload button to the code window 
