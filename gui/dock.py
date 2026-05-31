@@ -234,12 +234,18 @@ else:
             """
             Called by FreeCAD when an object property changes.
 
-            Args:
-                obj (App.DocumentObject): The modified object.
-                prop (str): The name of the property that changed.
+            Visibility changes are intentionally ignored. Users often hide/show the
+            native object or shadow to visually compare them, and that should not
+            rewrite the CodeCAD editor or alter the model/code sync state.
             """
             if self.panel.programmatic_update:
                 return
+
+            # Treat hide/show as viewport/debug behavior, not model-authoring behavior.
+            if prop == "Visibility":
+                self.panel.pause_gui_to_code_for_visibility_change(obj)
+                return
+
             if self.panel.gui_to_code_suppressed():
                 return
 
@@ -538,6 +544,29 @@ else:
             except Exception:
                 pass
             super().closeEvent(e)
+        
+        def pause_gui_to_code_for_visibility_change(self, obj=None):
+            """
+            Ignore GUI -> Code sync caused by hiding/unhiding objects.
+
+            Hiding objects is commonly used to inspect the build123d shadow against the
+            native FreeCAD object. It should not cause the editor to be regenerated from
+            the current FreeCAD feature tree, because that can erase Pos(...) placement
+            or otherwise rewrite the code from a temporary visual/debug state.
+            """
+            self.suppress_gui_to_code_for(1.0)
+
+            try:
+                self.timer_gui_to_code.stop()
+            except Exception:
+                pass
+
+            try:
+                name = getattr(obj, "Name", "object")
+                self.status.setText(f"Visibility changed for {name}; GUI → Code paused")
+                self.status.setStyleSheet("background: #eee; color: #555; padding: 5px;")
+            except Exception:
+                pass
 
         # -------------------------------------------------------------------------
         # Clear panel + make shadow blank (engine-only for shadow ops)
