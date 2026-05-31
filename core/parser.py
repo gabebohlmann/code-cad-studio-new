@@ -314,16 +314,189 @@ def _parse_pos_transform(line: str, local_env: dict[str, Any]) -> FreeCAD.Base.V
     return FreeCAD.Base.Vector(float(x), float(y), float(z))
 
 
+def _extract_balanced_call_at_start(expr: str, func_name: str) -> tuple[str | None, str]:
+    """
+    Extract `Func(...)` from the beginning of expr.
+
+    Returns:
+        (arg_string, remaining_text_after_call)
+    """
+    s = expr.strip()
+    prefix = func_name + "("
+    if not s.startswith(prefix):
+        return None, expr
+
+    start = len(func_name)
+    depth = 0
+    for i, ch in enumerate(s[start:], start=start):
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                arg_str = s[start + 1 : i]
+                rest = s[i + 1 :].strip()
+                return arg_str, rest
+
+    return None, expr
+
+
+def _find_top_level_boolean_operator(rhs: str) -> tuple[str | None, str | None, str | None]:
+    """
+    Split a RHS expression on a top-level boolean operator.
+
+    Supported:
+        left + right
+        left - right
+        left & right
+
+    Ignores operators inside function calls, tuples, etc.
+    """
+    depth = 0
+
+    for i, ch in enumerate(rhs):
+        if ch == "(":
+            depth += 1
+            continue
+        if ch == ")":
+            depth = max(0, depth - 1)
+            continue
+
+        if depth != 0 or ch not in ["+", "-", "&"]:
+            continue
+
+        # Avoid treating unary minus as boolean subtraction.
+        if ch == "-":
+            prev = rhs[:i].rstrip()
+            if not prev or prev[-1] in "([,+-*&=":
+                continue
+
+        left = rhs[:i].strip()
+        right = rhs[i + 1 :].strip()
+        if left and right:
+            return ch, left, right
+
+    return None, None, None
+
+
+def _parse_placed_primitive_expr(expr: str, local_env: dict[str, Any]) -> dict[str, Any] | None:
+    """
+    Parse a simple primitive expression, optionally preceded by Pos(...)*.
+
+    Supported examples:
+        Box(10, 10, 10)
+        Cylinder(radius=3, height=10)
+        Pos(5, 0, 0) * Cylinder(radius=3, height=10)
+    """
+    s = expr.strip()
+    pos_vec = None
+
+    if s.startswith("Pos("):
+        pos_args, rest = _extract_balanced_call_at_start(s, "Pos")
+        if pos_args is None:
+            return None
+
+        parts = _split_args(pos_args)
+        if len(parts) >= 3:
+            x = resolve_value(parts[0], local_env)
+            y = resolve_value(parts[1], local_env)
+            z = resolve_value(parts[2], local_env)
+            if x is not None and y is not None and z is not None:
+                pos_vec = FreeCAD.Base.Vector(float(x), float(y), float(z))
+
+        rest = rest.strip()
+        if rest.startswith("*"):
+            s = rest[1:].strip()
+        else:
+            return None
+
+    for prim in ["Box", "Cylinder", "Sphere", "Cone", "Torus"]:
+        arg_str, rest = _extract_balanced_call_at_start(s, prim)
+        if arg_str is not None and rest.strip() == "":
+            pos, kw = _parse_args_kwargs(arg_str)
+            return {
+                "prim": (prim, pos, kw),
+                "pos": pos_vec,
+            }
+
+    return None
+
+
+def _extract_boolean_expr(line: str, local_env: dict[str, Any]) -> dict[str, Any] | None:
+    """
+    Extract a simple two-input boolean expression from a `part = ...` line.
+
+    Supported:
+        part = Primitive(...) + Primitive(...)
+        part = Primitive(...) - Primitive(...)
+        part = Primitive(...) & Primitive(...)
+        part = Primitive(...) - Pos(...) * Primitive(...)
+    """
+    stripped = line.strip()
+    if not stripped.startswith("part") or "=" not in stripped:
+        return None
+
+    lhs, rhs = stripped.split("=", 1)
+    if lhs.strip() != "part":
+        return None
+
+    op, left, right = _find_top_level_boolean_operator(rhs)
+    if op is None:
+        return None
+
+    left_info = _parse_placed_primitive_expr(left, local_env)
+    right_info = _parse_placed_primitive_expr(right, local_env)
+
+    if left_info is None or right_info is None:
+        return None
+
+    return {
+        "op": op,
+        "left": left_info,
+        "right": right_info,
+    }
+
+
+def _boolean_type_id(op: str) -> str:
+    if op == "+":
+        return "Part::Fuse"
+    if op == "-":
+        return "Part::Cut"
+    if op == "&":
+        return "Part::Common"
+    raise ValueError(f"Unsupported boolean op: {op}")
+
+def _ensure_codecad_managed_boolean(obj: Any) -> None:
+    """
+    Mark a boolean object as CodeCAD-managed.
+    """
+    if not hasattr(obj, "CodeCAD_ManagedBoolean"):
+        try:
+            obj.addProperty(
+                "App::PropertyBool",
+                "CodeCAD_ManagedBoolean",
+                "CodeCAD",
+                "If true, this boolean was created/managed by CodeCAD code sync.",
+            )
+        except Exception:
+            pass
+
+    try:
+        obj.CodeCAD_ManagedBoolean = True
+    except Exception:
+        pass
+
 def _new_block() -> dict[str, Any]:
     """
-    Creates a parser block.
+    Create a parser block.
 
-    A block starts at a comment header like `# Box`. It may contain:
-    - one primitive assignment, e.g. `part = Box(...)`
-    - zero or more modifier assignments, e.g. `part = fillet(...)`
+    A block may contain:
+    - one primitive
+    - one boolean expression
+    - zero or more modifiers
     - optional Pos transform
     """
-    return {"prim": None, "mods": [], "pos": None}
+    return {"prim": None, "bool": None, "mods": [], "pos": None}
 
 
 def _extract_modifier_call(line: str, local_env: dict[str, Any]) -> dict[str, Any] | None:
@@ -668,7 +841,33 @@ def inject_code_to_freecad(full_code: str) -> tuple[bool, str]:
             if current_name not in blocks:
                 blocks[current_name] = _new_block()
 
-                # Primitive detection
+        # Boolean detection must happen before primitive detection.
+        # Otherwise `part = Box(...) - Cylinder(...)` gets mistaken for just Box.
+        bool_info = _extract_boolean_expr(line, local_env)
+        if bool_info is not None:
+            base_name = f"{current_name}_Base"
+            tool_name = f"{current_name}_Tool"
+
+            bool_block = blocks.pop(current_name, _new_block())
+
+            blocks[base_name] = _new_block()
+            blocks[base_name]["prim"] = bool_info["left"]["prim"]
+            blocks[base_name]["pos"] = bool_info["left"]["pos"]
+
+            blocks[tool_name] = _new_block()
+            blocks[tool_name]["prim"] = bool_info["right"]["prim"]
+            blocks[tool_name]["pos"] = bool_info["right"]["pos"]
+
+            bool_block["bool"] = {
+                "op": bool_info["op"],
+                "base_name": base_name,
+                "tool_name": tool_name,
+            }
+
+            blocks[current_name] = bool_block
+            continue
+
+        # Primitive detection
         matched_primitive = False
         for prim in ["Box", "Cylinder", "Sphere", "Cone", "Torus"]:
             arg_str = _extract_call(line, prim)
@@ -734,8 +933,89 @@ def inject_code_to_freecad(full_code: str) -> tuple[bool, str]:
     origin_refresh_list = []
 
     for name, info in blocks.items():
-        prim = info["prim"]
-        if prim is None:
+        prim = info.get("prim")
+        bool_info = info.get("bool")
+
+        if prim is None and bool_info is None:
+            continue
+
+        # Boolean feature path:
+        #   part = Box(...) + Cylinder(...)
+        #   part = Box(...) - Cylinder(...)
+        #   part = Box(...) & Cylinder(...)
+        #
+        # Boolean detection creates hidden primitive input blocks first:
+        #   <name>_Base
+        #   <name>_Tool
+        #
+        # Then this block creates the visible native FreeCAD boolean object:
+        #   Part::Fuse / Part::Cut / Part::Common
+        if bool_info is not None:
+            base_obj = doc.getObject(bool_info["base_name"])
+            tool_obj = doc.getObject(bool_info["tool_name"])
+
+            if base_obj is None or tool_obj is None:
+                return False, "Boolean inputs were not created"
+
+            desired_type = _boolean_type_id(bool_info["op"])
+            obj = doc.getObject(name)
+
+            created = False
+            changed_this_obj = False
+
+            if obj and getattr(obj, "TypeId", None) != desired_type:
+                doc.removeObject(obj.Name)
+                obj = None
+
+            if not obj:
+                obj = doc.addObject(desired_type, name)
+                created = True
+                changed_this_obj = True
+
+            _ensure_codecad_managed_boolean(obj)
+
+            if getattr(obj, "Base", None) is not base_obj:
+                obj.Base = base_obj
+                changed_this_obj = True
+
+            if getattr(obj, "Tool", None) is not tool_obj:
+                obj.Tool = tool_obj
+                changed_this_obj = True
+
+            # Match FreeCAD GUI feature-chain display behavior:
+            # inputs are hidden, result is shown.
+            _set_object_visible(base_obj, False)
+            _set_object_visible(tool_obj, False)
+            _set_object_visible(obj, True)
+
+            try:
+                obj.touch()
+            except Exception:
+                pass
+
+            # Allow modifier lines after a boolean, e.g.
+            #   part = Box(...) - Cylinder(...)
+            #   part = fillet(part.edges(), radius=1.0)
+            chain_tip = obj
+            for mod_index, mod in enumerate(info.get("mods", []), start=1):
+                chain_tip, mod_changed, err = _apply_native_modifier(
+                    doc=doc,
+                    base_obj=chain_tip,
+                    mod=mod,
+                    base_name=name,
+                    index=mod_index,
+                    local_env=local_env,
+                )
+
+                if err:
+                    return False, err
+
+                if mod_changed:
+                    changes_made = True
+
+            if created or changed_this_obj:
+                changes_made = True
+
             continue
 
         prim_type, pos_args, kw = prim
@@ -926,7 +1206,7 @@ def inject_code_to_freecad(full_code: str) -> tuple[bool, str]:
 
     keep_modifier_names = set()
     for base_name, info in blocks.items():
-        if info.get("prim") is None:
+        if info.get("prim") is None and info.get("bool") is None:
             continue
 
         for mod_index, mod in enumerate(info.get("mods", []), start=1):
