@@ -242,8 +242,13 @@ else:
                 return
 
             # Treat hide/show as viewport/debug behavior, not model-authoring behavior.
+            #
+            # Important: do NOT stop timer_gui_to_code here.
+            # FreeCAD commands like Fillet/Chamfer create a real feature and also hide
+            # the base object. If we cancel the queued GUI->Code update on that visibility
+            # event, the new feature never gets transpiled into the editor.
             if prop == "Visibility":
-                self.panel.pause_gui_to_code_for_visibility_change(obj)
+                self.panel.note_visibility_change_ignored(obj)
                 return
 
             if self.panel.gui_to_code_suppressed():
@@ -575,25 +580,17 @@ else:
                 pass
             super().closeEvent(e)
         
-        def pause_gui_to_code_for_visibility_change(self, obj=None):
+        def note_visibility_change_ignored(self, obj=None):
             """
-            Ignore GUI -> Code sync caused by hiding/unhiding objects.
+            Ignore GUI -> Code sync caused directly by hiding/unhiding objects.
 
-            Hiding objects is commonly used to inspect the build123d shadow against the
-            native FreeCAD object. It should not cause the editor to be regenerated from
-            the current FreeCAD feature tree, because that can erase Pos(...) placement
-            or otherwise rewrite the code from a temporary visual/debug state.
+            Do not stop timer_gui_to_code here. Some real FreeCAD modeling commands
+            such as Fillet/Chamfer also perform visibility changes as part of creating
+            a feature chain. Any queued model update should still be allowed to run.
             """
-            self.suppress_gui_to_code_for(1.0)
-
-            try:
-                self.timer_gui_to_code.stop()
-            except Exception:
-                pass
-
             try:
                 name = getattr(obj, "Name", "object")
-                self.status.setText(f"Visibility changed for {name}; GUI → Code paused")
+                self.status.setText(f"Visibility changed for {name}; ignored")
                 self.status.setStyleSheet("background: #eee; color: #555; padding: 5px;")
             except Exception:
                 pass
