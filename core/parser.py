@@ -488,7 +488,27 @@ def _edge_tuples_for_all_edges(base_obj: Any, value: float) -> list[tuple[int, f
     edges = list(getattr(shape, "Edges", []) or [])
     return [(i + 1, float(value), float(value)) for i in range(len(edges))]
 
+def _set_object_visible(obj: Any, visible: bool) -> None:
+    """
+    Sets object visibility without importing FreeCADGui.
 
+    FreeCAD GUI modifier commands usually hide the base object and show the
+    resulting modifier object. CodeCAD-created native modifiers should mimic
+    that behavior so the base shape is not overlaid with the modified result.
+    """
+    if obj is None:
+        return
+
+    try:
+        obj.Visibility = bool(visible)
+    except Exception:
+        pass
+
+    try:
+        if hasattr(obj, "ViewObject") and obj.ViewObject:
+            obj.ViewObject.Visibility = bool(visible)
+    except Exception:
+        pass
 
 
 def _apply_native_modifier(
@@ -529,6 +549,11 @@ def _apply_native_modifier(
     if _current_base(mod_obj) is not base_obj:
         mod_obj.Base = base_obj
         changed = True
+    
+    # Match FreeCAD GUI feature-chain display behavior:
+    # hide the input/base object and show the modifier result.
+    _set_object_visible(base_obj, False)
+    _set_object_visible(mod_obj, True)
 
     new_edges = _edge_tuples_for_all_edges(base_obj, value)
     if not new_edges:
@@ -569,6 +594,12 @@ def _remove_stale_codecad_modifiers(doc, keep_names: set[str]) -> bool:
 
         if obj.Name in keep_names:
             continue
+
+        try:
+            base = _current_base(obj)
+            _set_object_visible(base, True)
+        except Exception:
+            pass
 
         try:
             doc.removeObject(obj.Name)
@@ -886,6 +917,9 @@ def inject_code_to_freecad(full_code: str) -> tuple[bool, str]:
 
             if mod_changed:
                 changes_made = True
+        
+        if not info.get("mods"):
+            _set_object_visible(obj, True)
 
         if created or changed_this_obj:
             changes_made = True
