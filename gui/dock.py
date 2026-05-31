@@ -499,6 +499,23 @@ else:
             self.tabs.addTab(t_cmd, "FreeCAD Cmd")
 
             # -------------------------
+            # CODECAD JSON / IR TAB
+            # -------------------------
+            t_ir = QtGui.QWidget()
+            ir_l = QtGui.QVBoxLayout()
+            t_ir.setLayout(ir_l)
+
+            self.ir_editor = QtGui.QPlainTextEdit()
+            self.ir_editor.setReadOnly(True)
+            self.ir_editor.setFont(QtGui.QFont("Courier New", 10))
+            self.ir_editor.setPlainText(
+                "{\n  \"schema\": \"codecad.ir.v0\",\n  \"message\": \"IR will appear after Code → GUI sync\"\n}\n"
+            )
+            ir_l.addWidget(self.ir_editor)
+
+            self.tabs.addTab(t_ir, "CodeCAD JSON")
+
+            # -------------------------
             # TUNER TAB
             # -------------------------
             t2 = QtGui.QWidget()
@@ -751,6 +768,7 @@ else:
             try:
                 result = self.engine.apply_pipeline(code, make_shadow=True, verify=False)
                 self.update_fc_cmd_view(result.get("freecad_code") or result.get("trace"))
+                self.update_ir_view(result.get("ir_json"))
             finally:
                 # keep programmatic_update true a moment longer in case FreeCAD fires late change notifications
                 QtCore.QTimer.singleShot(250, self._end_programmatic_update)
@@ -1093,6 +1111,22 @@ else:
                     self.fc_cmd_editor.setPlainText(text)
                 finally:
                     self.fc_cmd_editor.blockSignals(False)
+            except Exception:
+                pass
+        
+        def update_ir_view(self, text: str | None):
+            """
+            Updates the read-only CodeCAD JSON / IR tab.
+            """
+            try:
+                if not text:
+                    text = "{\n  \"schema\": \"codecad.ir.v0\",\n  \"message\": \"No IR available\"\n}\n"
+
+                self.ir_editor.blockSignals(True)
+                try:
+                    self.ir_editor.setPlainText(text)
+                finally:
+                    self.ir_editor.blockSignals(False)
             except Exception:
                 pass
 

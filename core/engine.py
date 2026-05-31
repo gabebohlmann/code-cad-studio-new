@@ -1,6 +1,9 @@
 # core/engine.py
 
+import code
+
 import FreeCAD
+import json
 
 from core.transpiler import transpile_object
 from core.parser import inject_code_to_freecad, parse_variables
@@ -152,18 +155,24 @@ class SyncEngine:
             return ""
         return "from build123d import *\n\n" + transpile_object(tip_obj)
 
-    def apply_code_to_freecad(self, code: str, trace: list[str] | None = None):
+    def apply_code_to_freecad(
+    self,
+    code: str,
+    trace: list[str] | None = None,
+    ir_out: dict | None = None,
+):
         """
-        Parses the provided code and injects parameter values into existing FreeCAD objects.
-
+        Parses the provided code to find primitive calls and updates existing FreeCAD objects.
+        
         Args:
-            code (str): The Python source code.
-            trace (list[str] | None): Optional FreeCAD API trace output list.
-
-        Returns:
-            tuple[bool, str]: (Success boolean, Status message).
+            code (str): The full Python code to parse and apply.
+            trace (list[str], optional): A list to append trace messages to for debugging.
+            ir_out (dict, optional): A dict to populate with the intermediate representation for inspection.
+            
+        Returns: 
+            tuple[bool, str]: (Success, Message)
         """
-        return inject_code_to_freecad(code, trace=trace)
+        return inject_code_to_freecad(code, trace=trace, ir_out=ir_out)
 
     def ensure_shadow(self):
         """
@@ -428,9 +437,11 @@ class SyncEngine:
             verification info, and the FreeCAD API trace.
         """
         trace: list[str] = []
+        ir_doc: dict = {}
 
-        ok, msg = self.apply_code_to_freecad(code, trace=trace)
+        ok, msg = self.apply_code_to_freecad(code, trace=trace, ir_out=ir_doc)
         freecad_code = "\n".join(trace).rstrip() + ("\n" if trace else "")
+        ir_json = json.dumps(ir_doc, indent=2)
 
         if not ok:
             return {
@@ -442,6 +453,8 @@ class SyncEngine:
                 "verify_reason": "Not verified",
                 "freecad_code": freecad_code,
                 "trace": freecad_code,
+                "ir": ir_doc,
+                "ir_json": ir_json,
             }
 
         shadow = None
@@ -462,6 +475,8 @@ class SyncEngine:
                 "verify_reason": "Skipped/Unavailable",
                 "freecad_code": freecad_code,
                 "trace": freecad_code,
+                "ir": ir_doc,
+                "ir_json": ir_json,
             }
 
         v_ok, v_reason = self.verify(tip, shadow)
@@ -475,4 +490,6 @@ class SyncEngine:
             "verify_reason": v_reason,
             "freecad_code": freecad_code,
             "trace": freecad_code,
+            "ir": ir_doc,
+            "ir_json": ir_json,
         }

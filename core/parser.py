@@ -5,6 +5,8 @@ import FreeCAD as App
 import re
 from typing import Any
 
+from core.ir_builder import IRBuilder
+
 def resolve_value(val_str: str, local_env: dict[str, Any]) -> float | None:
     """
     Resolves a string value to a float.
@@ -1199,7 +1201,263 @@ def _trace_object_state(trace: list[str] | None, obj: Any, comment: str | None =
     except Exception:
         pass
 
-def inject_code_to_freecad(full_code: str, trace: list[str] | None = None) -> tuple[bool, str]:
+def _vec_to_ir(v: FreeCAD.Base.Vector | None) -> dict[str, float] | None:
+    """
+    Convert a FreeCAD vector to JSON-safe IR placement data.
+    """
+    if v is None:
+        return None
+
+    try:
+        return {
+            "x": float(v.x),
+            "y": float(v.y),
+            "z": float(v.z),
+        }
+    except Exception:
+        return None
+
+
+def _primitive_params_for_ir(
+    prim_type: str,
+    pos_args: list[str],
+    kw: dict[str, str],
+    local_env: dict[str, Any],
+) -> dict[str, Any]:
+    """
+    Convert the parser's primitive tuple into normalized IR params.
+
+    This mirrors the FreeCAD property mapping used later in inject_code_to_freecad.
+    """
+    def gv(key, default=None):
+        if key in kw:
+            return resolve_value(kw[key], local_env)
+        return default
+
+    if prim_type == "Box":
+        l = resolve_value(pos_args[0], local_env) if len(pos_args) > 0 else gv("length")
+        w = resolve_value(pos_args[1], local_env) if len(pos_args) > 1 else gv("width")
+        h = resolve_value(pos_args[2], local_env) if len(pos_args) > 2 else gv("height")
+        return {
+            "length": l,
+            "width": w,
+            "height": h,
+        }
+
+    if prim_type == "Cylinder":
+        r = gv("radius", None)
+        if r is None and len(pos_args) > 0:
+            r = resolve_value(pos_args[0], local_env)
+
+        h = gv("height", None)
+        if h is None and len(pos_args) > 1:
+            h = resolve_value(pos_args[1], local_env)
+
+        return {
+            "radius": r,
+            "height": h,
+        }
+
+    if prim_type == "Sphere":
+        r = gv("radius", None)
+        if r is None and len(pos_args) > 0:
+            r = resolve_value(pos_args[0], local_env)
+
+        return {
+            "radius": r,
+            "arc_size1": gv("arc_size1", None),
+            "arc_size2": gv("arc_size2", None),
+            "arc_size3": gv("arc_size3", None),
+        }
+
+    if prim_type == "Cone":
+        br = gv("bottom_radius", None)
+        tr = gv("top_radius", None)
+        h = gv("height", None)
+        ang = gv("arc_size", None)
+
+        if br is None and len(pos_args) > 0:
+            br = resolve_value(pos_args[0], local_env)
+        if tr is None and len(pos_args) > 1:
+            tr = resolve_value(pos_args[1], local_env)
+        if h is None and len(pos_args) > 2:
+            h = resolve_value(pos_args[2], local_env)
+        if ang is None and len(pos_args) > 3:
+            ang = resolve_value(pos_args[3], local_env)
+
+        return {
+            "bottom_radius": br,
+            "top_radius": tr,
+            "height": h,
+            "arc_size": ang,
+        }
+
+    if prim_type == "Torus":
+        mr = gv("major_radius", None)
+        nr = gv("minor_radius", None)
+
+        if mr is None and len(pos_args) > 0:
+            mr = resolve_value(pos_args[0], local_env)
+        if nr is None and len(pos_args) > 1:
+            nr = resolve_value(pos_args[1], local_env)
+
+        return {
+            "major_radius": mr,
+            "minor_radius": nr,
+            "minor_start_angle": gv("minor_start_angle", None),
+            "minor_end_angle": gv("minor_end_angle", None),
+            "major_angle": gv("major_angle", None),
+        }
+
+    return {}
+
+
+def _modifier_params_for_ir(mod: dict[str, Any], local_env: dict[str, Any]) -> dict[str, Any]:
+    """
+    Convert a parsed modifier into normalized IR params.
+    """
+    value = _resolve_modifier_value(mod, local_env)
+    if mod["type"] == "fillet":
+        return {"radius": value}
+    if mod["type"] == "chamfer":
+        return {"length": value}
+    return {"value": value}
+
+
+def _modifier_selector_for_ir(mod: dict[str, Any]) -> dict[str, Any]:
+    """
+    Convert the current modifier selector string into basic IR selector data.
+
+    This is intentionally simple for now.
+    """
+    selector = mod.get("selector", "")
+
+    if _selector_is_all_edges(selector):
+        return {
+            "kind": "edges",
+            "strategy": "all",
+            "source": selector,
+        }
+
+    return {
+        "kind": "unknown",
+        "strategy": "source",
+        "source": selector,
+    }
+
+
+def _blocks_to_ir(
+    blocks: dict[str, dict[str, Any]],
+    full_code: str,
+    local_env: dict[str, Any],
+) -> dict[str, Any]:
+    """
+    Convert the parser's current block model into a CodeCAD IR document.
+
+    This is a sidecar/debug representation for now. It does not yet drive the
+    FreeCAD applier.
+    """
+    irb = IRBuilder(source_mode="algebra")
+
+    # Capture simple numeric variables for version-control/debug visibility.
+    for v in parse_variables(full_code):
+        irb.add_variable(v["name"], v["value"])
+
+    block_to_feature: dict[str, str] = {}
+
+    # Pass 1: primitives.
+    for name, info in blocks.items():
+        prim = info.get("prim")
+        if prim is None:
+            continue
+
+        prim_type, pos_args, kw = prim
+
+        params = _primitive_params_for_ir(
+            prim_type=prim_type,
+            pos_args=pos_args,
+            kw=kw,
+            local_env=local_env,
+        )
+
+        placement = None
+        if info.get("pos") is not None:
+            placement = {
+                "type": "Pos",
+                "position": _vec_to_ir(info.get("pos")),
+            }
+
+        if _primitive_uses_freecad_origin(prim_type, kw):
+            if placement is None:
+                placement = {}
+            placement["origin_mode"] = "freecad"
+        else:
+            if placement is None:
+                placement = {}
+            placement["origin_mode"] = "build123d"
+
+        fid = irb.add_primitive(
+            type_name=prim_type.lower(),
+            name=name,
+            params=params,
+            placement=placement,
+        )
+
+        block_to_feature[name] = fid
+
+    # Pass 2: booleans and modifiers.
+    for name, info in blocks.items():
+        bool_info = info.get("bool")
+
+        current_root = block_to_feature.get(name)
+
+        if bool_info is not None:
+            base_name = bool_info["base_name"]
+            tool_name = bool_info["tool_name"]
+
+            base_fid = block_to_feature.get(base_name)
+            tool_fid = block_to_feature.get(tool_name)
+
+            if base_fid and tool_fid:
+                current_root = irb.add_boolean(
+                    op=bool_info["op"],
+                    name=name,
+                    base=base_fid,
+                    tool=tool_fid,
+                )
+                block_to_feature[name] = current_root
+
+        for mod_index, mod in enumerate(info.get("mods", []), start=1):
+            if not current_root:
+                continue
+
+            mod_name = mod.get("name") or _modifier_default_name(
+                name,
+                mod["type"],
+                mod_index,
+            )
+
+            current_root = irb.add_modifier(
+                mod_type=mod["type"],
+                name=mod_name,
+                base=current_root,
+                params=_modifier_params_for_ir(mod, local_env),
+                selector=_modifier_selector_for_ir(mod),
+            )
+
+            block_to_feature[name] = current_root
+
+        # Treat top-level primitive/boolean blocks as output objects.
+        if current_root and not name.endswith("_Base") and not name.endswith("_Tool"):
+            irb.add_object(name=name, root=current_root)
+
+    return irb.doc.to_dict()
+
+def inject_code_to_freecad(
+    full_code: str,
+    trace: list[str] | None = None,
+    ir_out: dict[str, Any] | None = None,
+) -> tuple[bool, str]:
     """
     Parses code to find primitive calls and updates existing FreeCAD objects.
 
@@ -1404,6 +1662,24 @@ def inject_code_to_freecad(full_code: str, trace: list[str] | None = None) -> tu
                 if blocks[current_name]["prim"] is None and last_prim_name:
                     target_name = last_prim_name
                 blocks[target_name]["pos"] = v
+
+    if ir_out is not None:
+        try:
+            ir_doc = _blocks_to_ir(
+                blocks=blocks,
+                full_code=full_code,
+                local_env=local_env,
+            )
+            ir_out.clear()
+            ir_out.update(ir_doc)
+        except Exception as e:
+            ir_out.clear()
+            ir_out.update(
+                {
+                    "schema": "codecad.ir.v0",
+                    "error": f"IR generation failed: {e}",
+                }
+            )
 
     if not blocks:
         return True, "No Changes"
