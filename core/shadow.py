@@ -92,6 +92,56 @@ def _bake_location_into_wrapped(bobj):
         # If anything goes wrong, fall back to raw wrapped
         return shape
 
+def _is_build123d_result_candidate(value) -> bool:
+    """
+    Returns True if a value looks like a build123d object that can be displayed.
+
+    This intentionally avoids depending on specific build123d classes so the
+    shadow remains tolerant of build123d version differences.
+    """
+    if value is None:
+        return False
+
+    # Skip imported classes/functions from `from build123d import *`.
+    if isinstance(value, type):
+        return False
+
+    if callable(value):
+        return False
+
+    # save_any_shape can handle objects with export_brep, wrapped, part, or sketch.
+    return (
+        hasattr(value, "export_brep")
+        or hasattr(value, "wrapped")
+        or hasattr(value, "part")
+        or hasattr(value, "sketch")
+    )
+
+
+def _find_build123d_result(local_env):
+    """
+    Finds the build123d object that should be displayed by the shadow.
+
+    Preferred behavior:
+      1. Use a variable named `part` if it exists, preserving old behavior.
+      2. Otherwise use the last user-created build123d-looking object.
+
+    This supports normal build123d examples such as:
+        ex2 = Box(length, width, thickness)
+        ex2 -= Cylinder(center_hole_dia / 2, height=thickness)
+    """
+    preferred = local_env.get("part")
+    if _is_build123d_result_candidate(preferred):
+        return preferred
+
+    for name, value in reversed(list(local_env.items())):
+        if name.startswith("__"):
+            continue
+
+        if _is_build123d_result_candidate(value):
+            return value
+
+    return None
 
 def save_any_shape(obj, path):
     """
@@ -203,10 +253,9 @@ class Build123dShadow:
             exec("from build123d import *", local_env)
             exec(obj.Code, local_env)
 
-            if "part" not in local_env:
+            raw_obj = _find_build123d_result(local_env)
+            if raw_obj is None:
                 return
-
-            raw_obj = local_env["part"]
 
             fd, temp_path = tempfile.mkstemp(suffix=".brep")
             os.close(fd)
