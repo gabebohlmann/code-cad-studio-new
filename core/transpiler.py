@@ -174,7 +174,7 @@ def generate_smart_selector_code(selected_geoms, parent_obj):
             except Exception:
                 pass
         if a_prints:
-            candidates.append((a_prints, f"part.edges().filter_by({axis_name})"))
+            candidates.append((a_prints, f"part.edges().sort_by({axis_name})"))
 
     for prints, code in candidates:
         if sel_prints == prints:
@@ -473,6 +473,7 @@ def transpile_object(obj):
             return "# Error: Orphaned Modifier"
 
         parent_code = transpile_object(parent)
+        # OLD: selectors not working well, need to analyze geometry to generate better ones
         selected_geoms = get_geometry_from_links(obj, parent)
         selectors = generate_smart_selector_code(selected_geoms, parent)
         combined = " + ".join(selectors)
