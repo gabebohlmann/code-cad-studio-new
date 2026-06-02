@@ -7,29 +7,277 @@
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>CodeCADStudio</title>
     <style>
-      body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; }
+      body {
+        margin: 0;
+        font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+        background-color: #09090b;
+        color: #f4f4f5;
+      }
 
       /* Main Grid: Viewer (left, flexible) | Sidebar (right, fixed width) */
-      #top { display: grid; grid-template-columns: 1fr 380px; gap: 10px; padding: 10px; height: 100vh; box-sizing: border-box; }
+      #top {
+        display: grid;
+        grid-template-columns: 1fr 380px;
+        gap: 12px;
+        padding: 12px;
+        height: 100vh;
+        box-sizing: border-box;
+        background-color: #09090b;
+      }
       
       /* 3D Viewport Container */
-      #viewer { background: #111; border-radius: 10px; overflow: hidden; }
+      #viewer {
+        background: #111115;
+        border-radius: 12px;
+        overflow: hidden;
+        border: 1px solid #1f1f23;
+        box-shadow: inset 0 0 20px rgba(0,0,0,0.6);
+      }
       
       /* Controls Container */
-      #side { display: flex; flex-direction: column; gap: 10px; }
+      #side {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        overflow-y: auto;
+        padding-right: 4px;
+      }
+
+      /* Custom scrollbar for sidebar */
+      #side::-webkit-scrollbar {
+        width: 6px;
+      }
+      #side::-webkit-scrollbar-thumb {
+        background: #27272a;
+        border-radius: 3px;
+      }
 
       /* Code Editor styling */
-      textarea { width: 100%; height: 260px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; }
+      textarea {
+        width: 100%;
+        height: 280px;
+        resize: vertical;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 13px;
+        background-color: #18181b;
+        color: #f4f4f5;
+        border: 1px solid #27272a;
+        border-radius: 10px;
+        padding: 12px;
+        box-sizing: border-box;
+        outline: none;
+        transition: border-color 0.2s;
+      }
+      textarea:focus {
+        border-color: #6366f1;
+        box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2);
+      }
       
       /* Button styling */
-      button { padding: 10px 12px; border: 0; border-radius: 8px; cursor: pointer; }
-      button:disabled { opacity: 0.5; cursor: default; }
+      button {
+        padding: 10px 14px;
+        border: 1px solid #27272a;
+        border-radius: 8px;
+        cursor: pointer;
+        background: #18181b;
+        color: #e4e4e7;
+        font-size: 13px;
+        font-weight: 500;
+        transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+      }
+      button:hover:not(:disabled) {
+        background: #27272a;
+        color: #fff;
+        border-color: #3f3f46;
+      }
+      button:active:not(:disabled) {
+        transform: scale(0.98);
+      }
+      button:disabled {
+        opacity: 0.4;
+        cursor: not-allowed;
+      }
 
-      /* Console/Log output styling */
-      #log { white-space: pre-wrap; background: #f6f6f6; border-radius: 8px; padding: 8px; height: 240px; overflow: auto; font-size: 12px; }
+      /* Primary / Render Action Buttons with sleek indigo/cyan gradients */
+      #renderPreview {
+        background: linear-gradient(135deg, #4f46e5 0%, #3730a3 100%);
+        border: none;
+        color: white;
+        font-weight: 600;
+        box-shadow: 0 2px 4px rgba(79, 70, 229, 0.3);
+      }
+      #renderPreview:hover:not(:disabled) {
+        background: linear-gradient(135deg, #6366f1 0%, #4338ca 100%);
+        box-shadow: 0 4px 8px rgba(79, 70, 229, 0.4);
+      }
+
+      #renderFinal {
+        background: linear-gradient(135deg, #06b6d4 0%, #0891b2 100%);
+        border: none;
+        color: white;
+        font-weight: 600;
+        box-shadow: 0 2px 4px rgba(6, 182, 212, 0.3);
+      }
+      #renderFinal:hover:not(:disabled) {
+        background: linear-gradient(135deg, #22d3ee 0%, #0e7490 100%);
+        box-shadow: 0 4px 8px rgba(6, 182, 212, 0.4);
+      }
+
+      /* Log and Panel wrap */
       .row { display: flex; gap: 8px; }
       .row button { flex: 1; }
-      .badge { font-size: 12px; padding: 2px 8px; border-radius: 999px; background: #eee; display: inline-block; }
+
+      /* Badges & Status */
+      .badge {
+        font-size: 11px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        padding: 4px 10px;
+        border-radius: 999px;
+        background: #18181b;
+        border: 1px solid #27272a;
+        color: #a1a1aa;
+        display: inline-block;
+      }
+
+      /* Toolbar styles */
+      .origin-toolbar {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 13px;
+        color: #a1a1aa;
+      }
+      .origin-toolbar button {
+        padding: 6px 12px;
+        font-size: 12px;
+      }
+      .origin-toolbar button.active {
+        background: #27272a;
+        color: #ffffff;
+        border-color: #6366f1;
+      }
+
+      /* Snippet toolbar */
+      .snippet-toolbar {
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+        font-size: 12px;
+      }
+      .snippet-group {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 6px;
+        border: 1px solid #18181b;
+        padding: 6px;
+        border-radius: 8px;
+        background: #0c0c0e;
+      }
+      .snippet-group-label {
+        font-weight: 600;
+        color: #71717a;
+        margin-right: 4px;
+      }
+      .snippet-group button {
+        padding: 4px 8px;
+        font-size: 11px;
+        border-radius: 6px;
+        background: #18181b;
+      }
+
+      /* Tab Container styling */
+      .debug-tabs {
+        display: flex;
+        flex-direction: column;
+        background: #18181b;
+        border: 1px solid #27272a;
+        border-radius: 12px;
+        overflow: hidden;
+        box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+        margin-top: 4px;
+        flex: 1;
+        min-height: 250px;
+      }
+
+      /* Tab Buttons Row */
+      .debug-tab-buttons {
+        display: flex;
+        background: #1f1f23;
+        border-bottom: 1px solid #27272a;
+        padding: 4px 4px 0 4px;
+        gap: 2px;
+      }
+
+      /* Tab Button styling */
+      .debug-tab-buttons button {
+        background: transparent;
+        color: #a1a1aa;
+        border: none;
+        border-radius: 8px 8px 0 0;
+        padding: 8px 14px;
+        font-size: 12px;
+        font-weight: 500;
+        cursor: pointer;
+        transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+        position: relative;
+        flex: none;
+      }
+      .debug-tab-buttons button:hover {
+        color: #f4f4f5;
+        background: rgb(255 255 255 / 0.05);
+      }
+      .debug-tab-buttons button.active {
+        color: #f4f4f5;
+        background: #18181b;
+        font-weight: 600;
+      }
+      /* Active tab indicator */
+      .debug-tab-buttons button.active::after {
+        content: '';
+        position: absolute;
+        bottom: 0;
+        left: 12px;
+        right: 12px;
+        height: 2px;
+        background: #6366f1;
+        border-radius: 9999px;
+      }
+
+      /* Debug panels styling */
+      .debug-panel {
+        margin: 0;
+        padding: 12px;
+        flex: 1;
+        height: 240px;
+        overflow: auto;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 12px;
+        line-height: 1.5;
+        color: #e4e4e7;
+        background: #18181b;
+        white-space: pre-wrap;
+        box-sizing: border-box;
+      }
+
+      /* Custom scrollbar for a premium feel */
+      .debug-panel::-webkit-scrollbar {
+        width: 8px;
+        height: 8px;
+      }
+      .debug-panel::-webkit-scrollbar-track {
+        background: #18181b;
+      }
+      .debug-panel::-webkit-scrollbar-thumb {
+        background: #27272a;
+        border-radius: 4px;
+        border: 2px solid #18181b;
+      }
+      .debug-panel::-webkit-scrollbar-thumb:hover {
+        background: #3f3f46;
+      }
     </style>
 
     <!-- three-cad-viewer styles -->
@@ -65,7 +313,20 @@
           <button id="clearLog">Clear log</button>
         </div>
 
-        <div id="log"></div>
+        <section class="debug-tabs">
+          <div class="debug-tab-buttons">
+            <button id="showLogTab" type="button" class="active">Log</button>
+            <button id="showTraceTab" type="button">FreeCAD Cmd</button>
+            <button id="showIrTab" type="button">CodeCAD JSON</button>
+          </div>
+
+          <pre id="log" class="debug-panel"></pre>
+          <pre id="freecadTrace" class="debug-panel" style="display: none;"># FreeCAD Cmd trace will appear after render.</pre>
+          <pre id="codecadIr" class="debug-panel" style="display: none;">{
+  "schema": "codecad.ir.v0",
+  "message": "CodeCAD JSON will appear after render."
+}</pre>
+        </section>
       </div>
     </div>
 

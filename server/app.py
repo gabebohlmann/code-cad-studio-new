@@ -203,6 +203,8 @@ def job_status(job_id: str) -> Dict[str, Any]:
         "logs": tail,
         "mesh_available": bool(j.mesh_path and os.path.exists(j.mesh_path)),
         "shapes_available": bool(j.shapes_path and os.path.exists(j.shapes_path)),
+        "trace_available": bool(getattr(j, "trace_path", None) and os.path.exists(j.trace_path)),
+        "ir_available": bool(getattr(j, "ir_path", None) and os.path.exists(j.ir_path)),
     }
 
 
@@ -256,3 +258,33 @@ def job_shapes(job_id: str):
     if not j.shapes_path or not os.path.exists(j.shapes_path):
         raise HTTPException(status_code=404, detail="shapes not found")
     return FileResponse(j.shapes_path, media_type="application/json", filename="out.json")
+
+
+@app.get("/api/v1/jobs/{job_id}/trace")
+def job_trace(job_id: str):
+    """
+    Retrieves the FreeCAD API trace generated for a completed job.
+    """
+    j = jobs.get(job_id)
+    if not j:
+        raise HTTPException(status_code=404, detail="job not found")
+    if j.status != "done":
+        raise HTTPException(status_code=409, detail=f"job not done (status={j.status})")
+    if not getattr(j, "trace_path", None) or not os.path.exists(j.trace_path):
+        raise HTTPException(status_code=404, detail="trace not found")
+    return FileResponse(j.trace_path, media_type="text/plain", filename="freecad_trace.py")
+
+
+@app.get("/api/v1/jobs/{job_id}/ir")
+def job_ir(job_id: str):
+    """
+    Retrieves the CodeCAD IR JSON generated for a completed job.
+    """
+    j = jobs.get(job_id)
+    if not j:
+        raise HTTPException(status_code=404, detail="job not found")
+    if j.status != "done":
+        raise HTTPException(status_code=409, detail=f"job not done (status={j.status})")
+    if not getattr(j, "ir_path", None) or not os.path.exists(j.ir_path):
+        raise HTTPException(status_code=404, detail="IR not found")
+    return FileResponse(j.ir_path, media_type="application/json", filename="codecad_ir.json")

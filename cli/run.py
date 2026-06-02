@@ -523,6 +523,8 @@ def main(argv=None):
     parser.add_argument("--mesh", required=False, help="Optional STL output path (.stl)")
     parser.add_argument("--mesh-quality", required=False, default="preview", choices=["preview", "final"])
     parser.add_argument("--shapes", required=False, help="Optional Shapes JSON output path (.json)")
+    parser.add_argument("--trace", required=False, help="Optional FreeCAD API trace output path (.py/.txt)")
+    parser.add_argument("--ir", required=False, help="Optional CodeCAD IR JSON output path (.json)")
     parser.add_argument("--verbose", action="store_true", help="Verbose logging")
     args = parser.parse_args(argv)
 
@@ -532,6 +534,8 @@ def main(argv=None):
     out_path = _normalize_path(args.out) if args.out else None
     mesh_path = _normalize_path(args.mesh) if args.mesh else None
     shapes_path = _normalize_path(args.shapes) if args.shapes else None
+    trace_path = _normalize_path(args.trace) if args.trace else None
+    ir_path = _normalize_path(args.ir) if args.ir else None
 
     if args.verbose:
         _log(f"[CodeCADStudio] mod_root={mod_root}")
@@ -539,6 +543,8 @@ def main(argv=None):
         _log(f"[CodeCADStudio] out ={out_path}")
         _log(f"[CodeCADStudio] mesh={mesh_path}")
         _log(f"[CodeCADStudio] shapes={shapes_path}")
+        _log(f"[CodeCADStudio] trace={trace_path}")
+        _log(f"[CodeCADStudio] ir={ir_path}")
         _log(f"[CodeCADStudio] mesh_quality={args.mesh_quality}")
 
     if not os.path.exists(code_path):
@@ -562,6 +568,24 @@ def main(argv=None):
         code = _read_text(code_path)
 
         result = engine.apply_pipeline(code, make_shadow=True, verify=False)
+
+        # Optional debug/source-of-truth artifacts for the web UI.
+        if trace_path:
+            try:
+                with open(trace_path, "w", encoding="utf-8") as f:
+                    f.write(result.get("freecad_code") or result.get("trace") or "")
+                _log(f"[CodeCADStudio] Wrote FreeCAD trace: {trace_path}")
+            except Exception as e:
+                _log(f"[CodeCADStudio] WARNING: failed to write FreeCAD trace: {e}")
+
+        if ir_path:
+            try:
+                with open(ir_path, "w", encoding="utf-8") as f:
+                    f.write(result.get("ir_json") or "{}")
+                _log(f"[CodeCADStudio] Wrote CodeCAD IR: {ir_path}")
+            except Exception as e:
+                _log(f"[CodeCADStudio] WARNING: failed to write CodeCAD IR: {e}")
+
         if not result.get("ok", False):
             _log("[CodeCADStudio] APPLY FAILED: " + str(result.get("message")))
             return 4

@@ -18,6 +18,12 @@ const elViewer = document.getElementById("viewer");
 const elCode = document.getElementById("code");
 const elLog = document.getElementById("log");
 const elStatus = document.getElementById("status");
+const elFreecadTrace = document.getElementById("freecadTrace");
+const elCodecadIr = document.getElementById("codecadIr");
+
+const btnShowLogTab = document.getElementById("showLogTab");
+const btnShowTraceTab = document.getElementById("showTraceTab");
+const btnShowIrTab = document.getElementById("showIrTab");
 const elSnippetToolbar = document.getElementById("snippetToolbar");
 const btnPreview = document.getElementById("renderPreview");
 const btnFinal = document.getElementById("renderFinal");
@@ -68,6 +74,16 @@ function log(line) {
  */
 function setStatus(s) {
   elStatus.textContent = s;
+}
+
+function showDebugTab(which) {
+  if (elLog) elLog.style.display = which === "log" ? "" : "none";
+  if (elFreecadTrace) elFreecadTrace.style.display = which === "trace" ? "" : "none";
+  if (elCodecadIr) elCodecadIr.style.display = which === "ir" ? "" : "none";
+
+  btnShowLogTab?.classList.toggle("active", which === "log");
+  btnShowTraceTab?.classList.toggle("active", which === "trace");
+  btnShowIrTab?.classList.toggle("active", which === "ir");
 }
 
 /**
@@ -245,6 +261,28 @@ async function loadShapes(jobId) {
   return await res.json();
 }
 
+async function loadTrace(jobId) {
+  const res = await fetch(`${API}/jobs/${jobId}/trace`);
+  if (!res.ok) {
+    return "# FreeCAD Cmd trace unavailable.";
+  }
+  return await res.text();
+}
+
+async function loadIr(jobId) {
+  const res = await fetch(`${API}/jobs/${jobId}/ir`);
+  if (!res.ok) {
+    return '{\n  "schema": "codecad.ir.v0",\n  "message": "CodeCAD JSON unavailable"\n}';
+  }
+
+  try {
+    const data = await res.json();
+    return JSON.stringify(data, null, 2);
+  } catch {
+    return await res.text();
+  }
+}
+
 /**
  * Renders the provided shapes in the 3D viewer.
  * * @param {object} shapes - The JSON geometry data.
@@ -387,9 +425,17 @@ async function render(mesh_quality) {
     setStatus("loading shapes…");
     const shapes = await loadShapes(job_id);
     showShapes(shapes);
+    log("shapes loaded");
+
+    setStatus("loading debug artifacts…");
+    if (elFreecadTrace) {
+      elFreecadTrace.textContent = await loadTrace(job_id);
+    }
+    if (elCodecadIr) {
+      elCodecadIr.textContent = await loadIr(job_id);
+    }
 
     setStatus("done");
-    log("shapes loaded");
   } catch (e) {
     setStatus("error");
     log(String(e));
@@ -410,8 +456,13 @@ if (btnOriginFreeCAD) {
   btnOriginFreeCAD.addEventListener("click", () => setOriginMode("freecad"));
 }
 
+btnShowLogTab?.addEventListener("click", () => showDebugTab("log"));
+btnShowTraceTab?.addEventListener("click", () => showDebugTab("trace"));
+btnShowIrTab?.addEventListener("click", () => showDebugTab("ir"));
+
 elCode.addEventListener("click", moveCodeCursorToBottom);
 btnPreview.addEventListener("click", () => render("preview"));
 btnFinal.addEventListener("click", () => render("final"));
 btnClearLog.addEventListener("click", () => (elLog.textContent = ""));
+showDebugTab("log");
 setStatus("idle");

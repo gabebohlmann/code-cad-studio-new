@@ -44,6 +44,8 @@ class Job:
     shapes_path: Optional[str] = None
     code_path: Optional[str] = None
     work_dir: Optional[str] = None
+    trace_path: Optional[str] = None
+    ir_path: Optional[str] = None
 
 
 class JobStore:
@@ -131,10 +133,14 @@ def run_freecad_job(
         mesh_path = norm(os.path.join(work_dir, "out.stl"))
         shapes_path = norm(os.path.join(work_dir, "out.json"))
         log_path = norm(os.path.join(work_dir, "run.log"))
+        trace_path = norm(os.path.join(work_dir, "freecad_trace.py"))
+        ir_path = norm(os.path.join(work_dir, "codecad_ir.json"))
 
         job.code_path = code_path
         job.mesh_path = mesh_path
         job.shapes_path = shapes_path
+        job.trace_path = trace_path
+        job.ir_path = ir_path
 
         with open(code_path, "w", encoding="utf-8") as f:
             f.write(code_text)
@@ -144,7 +150,9 @@ def run_freecad_job(
             f"--code {code_path} "
             f"--mesh {mesh_path} "
             f"--mesh-quality {mesh_quality} "
-            f"--shapes {shapes_path}"
+            f"--shapes {shapes_path} "
+            f"--trace {trace_path} "
+            f"--ir {ir_path}"
         )
         if verbose:
             pass_args += " --verbose"
