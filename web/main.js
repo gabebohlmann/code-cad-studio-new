@@ -37,15 +37,32 @@ function setOriginMode(mode) {
   originMode = mode === "freecad" ? "freecad" : "b123d";
   localStorage.setItem("codecadOriginMode", originMode);
 
+  // Always log to console so DevTools confirms the click fired
+  console.log("[origin] setOriginMode called:", originMode);
+
   if (btnOriginB123d) {
     btnOriginB123d.classList.toggle("active", originMode === "b123d");
+    btnOriginB123d.setAttribute("aria-pressed", originMode === "b123d" ? "true" : "false");
   }
 
   if (btnOriginFreeCAD) {
     btnOriginFreeCAD.classList.toggle("active", originMode === "freecad");
+    btnOriginFreeCAD.setAttribute("aria-pressed", originMode === "freecad" ? "true" : "false");
   }
 
-  log(`origin mode: ${originMode === "freecad" ? "FreeCAD" : "build123d"}`);
+  // Update the label text so mode is always visible in the toolbar itself
+  const elOriginLabel = document.querySelector(".origin-toolbar > span");
+  if (elOriginLabel) {
+    elOriginLabel.textContent = `Snippet origin (${originMode === "freecad" ? "FreeCAD" : "build123d"}):` ;
+  }
+
+  // Safe log — only write if elLog is present
+  if (elLog) {
+    try {
+      elLog.textContent += `snippet origin mode: ${originMode === "freecad" ? "FreeCAD" : "build123d"}\n`;
+      elLog.scrollTop = elLog.scrollHeight;
+    } catch { /* ignore */ }
+  }
 }
 
 function snippetCodeForOrigin(snip) {
@@ -328,6 +345,15 @@ function insertSnippet(snip) {
   if (!snip) return;
 
   const code = snippetCodeForOrigin(snip);
+
+  // Temporary debug — remove once origin buttons are confirmed working
+  console.log("insertSnippet", {
+    originMode,
+    key: snip.key,
+    hasFreecadCode: Boolean(snip.freecad_code),
+    inserted: code,
+  });
+
   if (!code) return;
 
   if (snip.mode === "replace") {
