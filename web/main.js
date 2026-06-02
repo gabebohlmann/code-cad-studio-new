@@ -127,12 +127,8 @@ function setBusy(b) {
 // Default code example
 elCode.value = `from build123d import *
 
-L = 5.0
-W = 20.0
-H = 3.0
-
 # Box
-part = Box(L, W, H)
+part = Box(10, 10, 10)
 `;
 
 // --------------------
@@ -407,6 +403,13 @@ async function loadSnippets() {
       }
 
       elSnippetToolbar.appendChild(group);
+    }
+
+    // Seed lastReplaceSnippet with the "box" snippet so the origin toggle works
+    // immediately on page load — the default starting code in the editor is a Box.
+    if (!lastReplaceSnippet) {
+      const boxSnip = snippets.find((s) => s.key === "box");
+      if (boxSnip) lastReplaceSnippet = boxSnip;
     }
   } catch (e) {
     log(`snippet load failed: ${e}`);
