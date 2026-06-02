@@ -33,12 +33,13 @@ const btnOriginFreeCAD = document.getElementById("originFreeCAD");
 
 let originMode = localStorage.getItem("codecadOriginMode") || "b123d";
 
+// Tracks the last snippet inserted in "replace" mode so we can re-apply it
+// with a different origin variant when the user toggles the origin buttons.
+let lastReplaceSnippet = null;
+
 function setOriginMode(mode) {
   originMode = mode === "freecad" ? "freecad" : "b123d";
   localStorage.setItem("codecadOriginMode", originMode);
-
-  // Always log to console so DevTools confirms the click fired
-  console.log("[origin] setOriginMode called:", originMode);
 
   if (btnOriginB123d) {
     btnOriginB123d.classList.toggle("active", originMode === "b123d");
@@ -50,13 +51,23 @@ function setOriginMode(mode) {
     btnOriginFreeCAD.setAttribute("aria-pressed", originMode === "freecad" ? "true" : "false");
   }
 
-  // Update the label text so mode is always visible in the toolbar itself
+  // Update the toolbar label to always show the current mode
   const elOriginLabel = document.querySelector(".origin-toolbar > span");
   if (elOriginLabel) {
     elOriginLabel.textContent = `Snippet origin (${originMode === "freecad" ? "FreeCAD" : "build123d"}):` ;
   }
 
-  // Safe log — only write if elLog is present
+  // If a replace-mode snippet is currently in the editor, re-apply it with
+  // the new origin so the code window reflects the toggle immediately.
+  if (lastReplaceSnippet) {
+    const newCode = snippetCodeForOrigin(lastReplaceSnippet);
+    if (newCode) {
+      elCode.value = String(newCode).trimEnd() + "\n";
+      moveCodeCursorToBottom();
+    }
+  }
+
+  // Log the mode change
   if (elLog) {
     try {
       elLog.textContent += `snippet origin mode: ${originMode === "freecad" ? "FreeCAD" : "build123d"}\n`;
@@ -345,23 +356,18 @@ function insertSnippet(snip) {
   if (!snip) return;
 
   const code = snippetCodeForOrigin(snip);
-
-  // Temporary debug — remove once origin buttons are confirmed working
-  console.log("insertSnippet", {
-    originMode,
-    key: snip.key,
-    hasFreecadCode: Boolean(snip.freecad_code),
-    inserted: code,
-  });
-
   if (!code) return;
 
   if (snip.mode === "replace") {
+    // Remember this snippet so the origin toggle can re-apply it
+    lastReplaceSnippet = snip;
     elCode.value = String(code).trimEnd() + "\n";
     moveCodeCursorToBottom();
     return;
   }
 
+  // Append-mode snippets do not replace the editor, so clear the tracker
+  // only if the user has started composing (no single-snippet baseline anymore).
   appendCodeAtBottom(code);
 }
 
