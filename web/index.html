@@ -97,6 +97,15 @@
         opacity: 0.4;
         cursor: not-allowed;
       }
+      button.danger {
+        border-color: #ef4444;
+        color: #f87171;
+      }
+      button.danger:hover:not(:disabled) {
+        background: rgba(239, 68, 68, 0.15);
+        color: #fca5a5;
+        border-color: #f87171;
+      }
 
       /* Primary / Render Action Buttons with sleek indigo/cyan gradients */
       #renderPreview {
@@ -311,7 +320,8 @@
         </div>
 
         <div class="row">
-          <button id="clearLog">Clear log</button>
+          <button id="clearCode" type="button" class="danger">Clear code</button>
+          <button id="clearLog" type="button">Clear log</button>
         </div>
 
         <section class="debug-tabs">

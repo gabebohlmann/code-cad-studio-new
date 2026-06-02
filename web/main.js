@@ -28,6 +28,7 @@ const elSnippetToolbar = document.getElementById("snippetToolbar");
 const btnPreview = document.getElementById("renderPreview");
 const btnFinal = document.getElementById("renderFinal");
 const btnClearLog = document.getElementById("clearLog");
+const btnClearCode = document.getElementById("clearCode");
 const btnOriginB123d = document.getElementById("originB123d");
 const btnOriginFreeCAD = document.getElementById("originFreeCAD");
 
@@ -335,6 +336,35 @@ function moveCodeCursorToBottom() {
   }
 }
 
+function clearCodeWindowConfirmed() {
+  const ok = window.confirm(
+    "Clear the CodeCAD editor?\n\nThis will remove the code from the browser editor. The web render backend is job-based, so this does not delete any persistent FreeCAD document."
+  );
+
+  if (!ok) return;
+
+  elCode.value = "";
+  lastReplaceSnippet = null;
+
+  if (elFreecadTrace) {
+    elFreecadTrace.textContent = "# FreeCAD Cmd trace will appear after render.";
+  }
+
+  if (elCodecadIr) {
+    elCodecadIr.textContent = '{\n  "schema": "codecad.ir.v0",\n  "message": "CodeCAD JSON will appear after render."\n}';
+  }
+
+  try {
+    viewer?.clear?.();
+  } catch {
+    // ignore
+  }
+
+  setStatus("cleared");
+  log("code window cleared");
+  elCode.focus();
+}
+
 function appendCodeAtBottom(code) {
   const current = elCode.value.trimEnd();
   const snippet = String(code || "").replace(/^\n+|\n+$/g, "");
@@ -498,6 +528,7 @@ btnShowIrTab?.addEventListener("click", () => showDebugTab("ir"));
 elCode.addEventListener("click", moveCodeCursorToBottom);
 btnPreview.addEventListener("click", () => render("preview"));
 btnFinal.addEventListener("click", () => render("final"));
+btnClearCode?.addEventListener("click", clearCodeWindowConfirmed);
 btnClearLog.addEventListener("click", () => (elLog.textContent = ""));
 showDebugTab("log");
 setStatus("idle");

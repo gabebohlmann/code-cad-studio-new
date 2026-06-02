@@ -246,6 +246,72 @@ class SyncEngine:
         except Exception:
             return False
 
+    def clear_part_feature_tree(self, doc=None):
+        """
+        Removes all CodeCAD/Part workbench geometry from the active document.
+
+        This is used by the local FreeCAD workbench Clear Code action. It removes:
+          - all Part::* objects, including primitives, booleans, fillets/chamfers
+          - Build123d_Shadow
+
+        It intentionally does not remove non-Part document objects.
+        """
+        doc = doc or self.api.active_doc()
+        if not doc:
+            return {"ok": False, "message": "No active document", "removed": 0}
+
+        targets = []
+        for obj in list(doc.Objects):
+            name = getattr(obj, "Name", "")
+            type_id = getattr(obj, "TypeId", "")
+
+            if name == "Build123d_Shadow" or type_id.startswith("Part::"):
+                targets.append(obj)
+
+        removed = 0
+        failed = []
+
+        # Remove in reverse creation order so child/tip features usually go first.
+        for obj in reversed(targets):
+            try:
+                doc.removeObject(obj.Name)
+                removed += 1
+            except Exception as e:
+                failed.append((getattr(obj, "Name", "unknown"), str(e)))
+
+        # Retry once in case dependency order blocked a removal.
+        if failed:
+            retry_failed = []
+            for name, _err in failed:
+                obj = doc.getObject(name)
+                if not obj:
+                    continue
+                try:
+                    doc.removeObject(name)
+                    removed += 1
+                except Exception as e:
+                    retry_failed.append((name, str(e)))
+            failed = retry_failed
+
+        try:
+            self.api.recompute()
+        except Exception:
+            pass
+
+        if failed:
+            return {
+                "ok": False,
+                "message": f"Cleared {removed} objects; failed to remove {len(failed)}",
+                "removed": removed,
+                "failed": failed,
+            }
+
+        return {
+            "ok": True,
+            "message": f"Cleared {removed} objects",
+            "removed": removed,
+        }
+
     def verify(self, tip_obj, shadow_obj):
         """
         Compares the FreeCAD object (tip) against the Shadow object.

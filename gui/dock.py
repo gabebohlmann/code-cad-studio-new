@@ -463,8 +463,22 @@ else:
             self.btn_clear_selection = QtGui.QPushButton("Clear Selection")
             self.btn_clear_selection.clicked.connect(lambda: FreeCADGui.Selection.clearSelection())
 
+            self.btn_clear_code_tree = QtGui.QPushButton("Clear Code + Tree")
+            self.btn_clear_code_tree.setToolTip(
+                "Clear the CodeCAD editor and remove all Part/CodeCAD objects from the FreeCAD feature tree."
+            )
+            self.btn_clear_code_tree.clicked.connect(self.confirm_clear_code_and_feature_tree)
+
+            try:
+                self.btn_clear_code_tree.setStyleSheet(
+                    "background: #fee; color: #900; font-weight: bold;"
+                )
+            except Exception:
+                pass
+
             row.addWidget(self.btn_insert_selector)
             row.addWidget(self.btn_clear_selection)
+            row.addWidget(self.btn_clear_code_tree)
             tools_l.addLayout(row)
 
             # Origin toggle button (single button)
@@ -672,6 +686,96 @@ else:
 
             finally:
                 self.programmatic_update = False
+
+        def confirm_clear_code_and_feature_tree(self):
+            """
+            Ask the user to confirm clearing the editor and native FreeCAD feature tree.
+            """
+            reply = QtGui.QMessageBox.question(
+                self,
+                "Clear CodeCAD editor and feature tree?",
+                (
+                    "This will clear the CodeCAD code window and remove all Part/CodeCAD "
+                    "objects from the current FreeCAD feature tree.\n\n"
+                    "This cannot be undone by CodeCAD. Continue?"
+                ),
+                QtGui.QMessageBox.Yes | QtGui.QMessageBox.No,
+                QtGui.QMessageBox.No,
+            )
+
+            if reply != QtGui.QMessageBox.Yes:
+                return
+
+            self.clear_code_and_feature_tree()
+
+        def clear_code_and_feature_tree(self):
+            """
+            Clears the editor and removes the current CodeCAD/Part feature tree.
+
+            This is intentionally programmatic and suppresses GUI->Code sync so object
+            deletion does not immediately regenerate stale code from the shrinking tree.
+            """
+            self.suppress_gui_to_code_for(2.0)
+            self.programmatic_update = True
+
+            try:
+                try:
+                    self.timer_gui_to_code.stop()
+                    self.timer_code_to_gui.stop()
+                except Exception:
+                    pass
+
+                try:
+                    FreeCADGui.Selection.clearSelection()
+                except Exception:
+                    pass
+
+                result = self.engine.clear_part_feature_tree()
+
+                # Clear main editor without triggering Code -> GUI.
+                self.editor.blockSignals(True)
+                try:
+                    self.editor.setPlainText("")
+                finally:
+                    self.editor.blockSignals(False)
+
+                # Clear tuner widgets.
+                for name in list(self.param_widgets.keys()):
+                    try:
+                        self.param_widgets[name].deleteLater()
+                    except Exception:
+                        pass
+                    del self.param_widgets[name]
+
+                # Reset selector UI.
+                self.set_selector_text(None, hint="No part in document. Create a Part:: object…")
+
+                # Reset debug tabs.
+                self.update_fc_cmd_view("# Cleared CodeCAD editor and FreeCAD Part feature tree.\n")
+                self.update_ir_view(
+                    '{\n'
+                    '  "schema": "codecad.ir.v0",\n'
+                    '  "message": "Cleared CodeCAD editor and FreeCAD Part feature tree"\n'
+                    '}\n'
+                )
+
+                # Reset status / verification.
+                msg = result.get("message", "Cleared")
+                if result.get("ok", False):
+                    self.status.setText(msg)
+                    self.status.setStyleSheet("background: #eee; color: #555; padding: 5px;")
+                else:
+                    self.status.setText(msg)
+                    self.status.setStyleSheet("background: #fdd; color: red; padding: 5px;")
+
+                self.verify_bar.setText("NO PART")
+                self.verify_bar.setStyleSheet("background: #ccc; color: #555; padding: 8px;")
+
+                self.btn_origin_toggle.setText("Use build123d origin")
+                self.btn_origin_toggle.setEnabled(False)
+
+            finally:
+                QtCore.QTimer.singleShot(250, self._end_programmatic_update)
 
         # -------------------------------------------------------------------------
         # GUI -> CODE
