@@ -288,6 +288,22 @@
       .debug-panel::-webkit-scrollbar-thumb:hover {
         background: #3f3f46;
       }
+      
+      /* Selection Panel styling */
+      .selection-panel {
+        padding: 12px;
+        background: #18181b;
+        border: 1px solid #27272a;
+        border-radius: 10px;
+        font-size: 13px;
+        color: #e4e4e7;
+        margin-top: 8px;
+        box-sizing: border-box;
+      }
+      .selection-panel strong {
+        color: #a1a1aa;
+        margin-right: 6px;
+      }
     </style>
 
     <!-- three-cad-viewer styles -->
@@ -329,6 +345,7 @@
             <button id="showLogTab" type="button" class="active">Log</button>
             <button id="showTraceTab" type="button">FreeCAD Cmd</button>
             <button id="showIrTab" type="button">CodeCAD JSON</button>
+            <button id="showPickmapTab" type="button">Selection</button>
           </div>
 
           <pre id="log" class="debug-panel"></pre>
@@ -337,6 +354,15 @@
   "schema": "codecad.ir.v0",
   "message": "CodeCAD JSON will appear after render."
 }</pre>
+          <pre id="codecadPickmap" class="debug-panel" style="display: none;">{
+  "schema": "codecad.pickmap.v0",
+  "message": "Pickmap will appear after render."
+}</pre>
+
+          <div id="selectionPanel" class="selection-panel">
+            <strong>Selection:</strong>
+            <span id="selectionSummary">Nothing selected</span>
+          </div>
         </section>
       </div>
     </div>

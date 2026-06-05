@@ -20,6 +20,12 @@ const elLog = document.getElementById("log");
 const elStatus = document.getElementById("status");
 const elFreecadTrace = document.getElementById("freecadTrace");
 const elCodecadIr = document.getElementById("codecadIr");
+const elCodecadPickmap = document.getElementById("codecadPickmap");
+const elSelectionSummary = document.getElementById("selectionSummary");
+const btnShowPickmapTab = document.getElementById("showPickmapTab");
+
+let currentPickmap = null;
+let currentSelection = null;
 
 const btnShowLogTab = document.getElementById("showLogTab");
 const btnShowTraceTab = document.getElementById("showTraceTab");
@@ -109,10 +115,12 @@ function showDebugTab(which) {
   if (elLog) elLog.style.display = which === "log" ? "" : "none";
   if (elFreecadTrace) elFreecadTrace.style.display = which === "trace" ? "" : "none";
   if (elCodecadIr) elCodecadIr.style.display = which === "ir" ? "" : "none";
+  if (elCodecadPickmap) elCodecadPickmap.style.display = which === "pickmap" ? "" : "none";
 
   btnShowLogTab?.classList.toggle("active", which === "log");
   btnShowTraceTab?.classList.toggle("active", which === "trace");
   btnShowIrTab?.classList.toggle("active", which === "ir");
+  btnShowPickmapTab?.classList.toggle("active", which === "pickmap");
 }
 
 /**
@@ -145,17 +153,126 @@ let renderOptions = null;
 let viewerOptions = null;
 
 
+function summarizePickmapObject(obj) {
+  if (!obj) return "Nothing selected";
+
+  const shape = obj.shape || {};
+  const src = obj.source || {};
+
+  return [
+    `Object: ${obj.name || obj.object_id || "unknown"}`,
+    `Type: ${src.freecad_type || "unknown"}`,
+    `Faces: ${shape.faces ?? "?"}`,
+    `Edges: ${shape.edges ?? "?"}`,
+    `Vertices: ${shape.vertices ?? "?"}`,
+    `Volume: ${shape.volume ?? "?"}`,
+  ].join(" | ");
+}
+
+function setSelection(selection) {
+  currentSelection = selection || null;
+
+  if (!elSelectionSummary) return;
+
+  if (!currentSelection) {
+    elSelectionSummary.textContent = "Nothing selected";
+    return;
+  }
+
+  elSelectionSummary.textContent = summarizePickmapObject(currentSelection.object);
+}
+
+function findPickmapObjectForRenderedPart(renderPartIdOrName) {
+  if (!currentPickmap || !Array.isArray(currentPickmap.objects)) return null;
+
+  const wanted = String(renderPartIdOrName || "");
+
+  return currentPickmap.objects.find((obj) => {
+    const src = obj.source || {};
+    return (
+      obj.object_id === wanted ||
+      obj.name === wanted ||
+      src.render_part_id === wanted ||
+      src.render_part_name === wanted ||
+      wanted.endsWith(String(src.render_part_name || "")) ||
+      wanted.endsWith(String(obj.object_id || ""))
+    );
+  }) || null;
+}
+
+function extractRenderedPartIdFromPick(pick) {
+  if (!pick) return null;
+
+  // three-cad-viewer pick objects can vary by version. Be permissive.
+  const candidates = [
+    pick.id,
+    pick.name,
+    pick.path,
+    pick.objectId,
+    pick.partId,
+    pick?.object?.id,
+    pick?.object?.name,
+    pick?.object?.userData?.id,
+    pick?.object?.userData?.partId,
+    pick?.object?.userData?.objectId,
+  ];
+
+  for (const c of candidates) {
+    if (c !== undefined && c !== null && String(c).trim()) {
+      return String(c);
+    }
+  }
+
+  return null;
+}
+
+function handleViewerPick(pick) {
+  const renderedId = extractRenderedPartIdFromPick(pick);
+
+  // Current Shapes JSON exports one rendered part: /Group/Part_0.
+  // If three-cad-viewer does not expose an id in the pick event, use that
+  // as the MVP fallback.
+  const object =
+    findPickmapObjectForRenderedPart(renderedId) ||
+    findPickmapObjectForRenderedPart("/Group/Part_0") ||
+    findPickmapObjectForRenderedPart("Part_0");
+
+  if (!object) {
+    setSelection(null);
+    log(`pick received but no pickmap object matched: ${JSON.stringify(pick)}`);
+    return;
+  }
+
+  setSelection({
+    kind: "object",
+    render_revision: currentPickmap?.render_revision,
+    render_part_id: renderedId || "/Group/Part_0",
+    object,
+    raw_pick: pick,
+  });
+
+  showDebugTab("pickmap");
+}
+
 /**
  * Callback triggered by the 3D Viewer when the scene changes (e.g., selection).
  * * @param {object} change - The event data from the viewer.
  */
 function notifyChange(change) {
-  // later on pick/selection events back to FreeCAD.
   try {
-    const pick = change?.lastPick?.new;
-    if (pick) console.log("picked:", pick);
-  } catch {
-    // ignore
+    const pick =
+      change?.lastPick?.new ||
+      change?.lastPick ||
+      change?.pick ||
+      change?.selected ||
+      null;
+
+    if (pick) {
+      console.log("picked:", pick);
+      handleViewerPick(pick);
+    }
+  } catch (e) {
+    console.warn("pick handling failed", e, change);
   }
 }
 
@@ -308,6 +425,18 @@ async function loadIr(jobId) {
   }
 }
 
+async function loadPickmap(jobId) {
+  const res = await fetch(`${API}/jobs/${jobId}/pickmap`);
+  if (!res.ok) {
+    return {
+      schema: "codecad.pickmap.v0",
+      message: "CodeCAD pickmap unavailable",
+      objects: [],
+    };
+  }
+  return await res.json();
+}
+
 /**
  * Renders the provided shapes in the 3D viewer.
  * * @param {object} shapes - The JSON geometry data.
@@ -352,6 +481,17 @@ function clearCodeWindowConfirmed() {
 
   if (elCodecadIr) {
     elCodecadIr.textContent = '{\n  "schema": "codecad.ir.v0",\n  "message": "CodeCAD JSON will appear after render."\n}';
+  }
+
+  currentPickmap = null;
+  currentSelection = null;
+
+  if (elCodecadPickmap) {
+    elCodecadPickmap.textContent = '{\n  "schema": "codecad.pickmap.v0",\n  "message": "Pickmap will appear after render."\n}';
+  }
+
+  if (elSelectionSummary) {
+    elSelectionSummary.textContent = "Nothing selected";
   }
 
   try {
@@ -500,6 +640,13 @@ async function render(mesh_quality) {
       elCodecadIr.textContent = await loadIr(job_id);
     }
 
+    currentPickmap = await loadPickmap(job_id);
+
+    if (elCodecadPickmap) {
+      elCodecadPickmap.textContent = JSON.stringify(currentPickmap, null, 2);
+    }
+
+    setSelection(null);
     setStatus("done");
   } catch (e) {
     setStatus("error");
@@ -524,6 +671,7 @@ if (btnOriginFreeCAD) {
 btnShowLogTab?.addEventListener("click", () => showDebugTab("log"));
 btnShowTraceTab?.addEventListener("click", () => showDebugTab("trace"));
 btnShowIrTab?.addEventListener("click", () => showDebugTab("ir"));
+btnShowPickmapTab?.addEventListener("click", () => showDebugTab("pickmap"));
 
 elCode.addEventListener("click", moveCodeCursorToBottom);
 btnPreview.addEventListener("click", () => render("preview"));

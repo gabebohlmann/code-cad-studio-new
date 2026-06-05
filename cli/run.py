@@ -525,6 +525,7 @@ def main(argv=None):
     parser.add_argument("--shapes", required=False, help="Optional Shapes JSON output path (.json)")
     parser.add_argument("--trace", required=False, help="Optional FreeCAD API trace output path (.py/.txt)")
     parser.add_argument("--ir", required=False, help="Optional CodeCAD IR JSON output path (.json)")
+    parser.add_argument("--pickmap", required=False, help="Optional CodeCAD pickmap JSON output path (.json)")
     parser.add_argument("--verbose", action="store_true", help="Verbose logging")
     args = parser.parse_args(argv)
 
@@ -536,6 +537,7 @@ def main(argv=None):
     shapes_path = _normalize_path(args.shapes) if args.shapes else None
     trace_path = _normalize_path(args.trace) if args.trace else None
     ir_path = _normalize_path(args.ir) if args.ir else None
+    pickmap_path = _normalize_path(args.pickmap) if args.pickmap else None
 
     if args.verbose:
         _log(f"[CodeCADStudio] mod_root={mod_root}")
@@ -545,6 +547,7 @@ def main(argv=None):
         _log(f"[CodeCADStudio] shapes={shapes_path}")
         _log(f"[CodeCADStudio] trace={trace_path}")
         _log(f"[CodeCADStudio] ir={ir_path}")
+        _log(f"[CodeCADStudio] pickmap={pickmap_path}")
         _log(f"[CodeCADStudio] mesh_quality={args.mesh_quality}")
 
     if not os.path.exists(code_path):
@@ -585,6 +588,26 @@ def main(argv=None):
                 _log(f"[CodeCADStudio] Wrote CodeCAD IR: {ir_path}")
             except Exception as e:
                 _log(f"[CodeCADStudio] WARNING: failed to write CodeCAD IR: {e}")
+
+        if pickmap_path:
+            try:
+                from core.pickmap import build_pickmap
+
+                pickmap = build_pickmap(
+                    doc=doc,
+                    code=code,
+                    ir_doc=result.get("ir") or {},
+                    render_part_id="/Group/Part_0",
+                    render_part_name="Part_0",
+                    export_source="three_cad_viewer_shapes_json",
+                )
+
+                with open(pickmap_path, "w", encoding="utf-8") as f:
+                    json.dump(pickmap, f, indent=2)
+
+                _log(f"[CodeCADStudio] Wrote CodeCAD pickmap: {pickmap_path}")
+            except Exception as e:
+                _log(f"[CodeCADStudio] WARNING: failed to write CodeCAD pickmap: {e}")
 
         if not result.get("ok", False):
             _log("[CodeCADStudio] APPLY FAILED: " + str(result.get("message")))
