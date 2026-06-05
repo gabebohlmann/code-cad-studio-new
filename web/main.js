@@ -23,9 +23,11 @@ const elCodecadIr = document.getElementById("codecadIr");
 const elCodecadPickmap = document.getElementById("codecadPickmap");
 const elSelectionSummary = document.getElementById("selectionSummary");
 const btnShowPickmapTab = document.getElementById("showPickmapTab");
+const btnCopyDebugTab = document.getElementById("copyDebugTab");
 
 let currentPickmap = null;
 let currentSelection = null;
+let activeDebugTab = "log";
 
 const btnShowLogTab = document.getElementById("showLogTab");
 const btnShowTraceTab = document.getElementById("showTraceTab");
@@ -112,15 +114,85 @@ function setStatus(s) {
 }
 
 function showDebugTab(which) {
-  if (elLog) elLog.style.display = which === "log" ? "" : "none";
-  if (elFreecadTrace) elFreecadTrace.style.display = which === "trace" ? "" : "none";
-  if (elCodecadIr) elCodecadIr.style.display = which === "ir" ? "" : "none";
-  if (elCodecadPickmap) elCodecadPickmap.style.display = which === "pickmap" ? "" : "none";
+  activeDebugTab = which || "log";
 
-  btnShowLogTab?.classList.toggle("active", which === "log");
-  btnShowTraceTab?.classList.toggle("active", which === "trace");
-  btnShowIrTab?.classList.toggle("active", which === "ir");
-  btnShowPickmapTab?.classList.toggle("active", which === "pickmap");
+  if (elLog) elLog.style.display = activeDebugTab === "log" ? "" : "none";
+  if (elFreecadTrace) elFreecadTrace.style.display = activeDebugTab === "trace" ? "" : "none";
+  if (elCodecadIr) elCodecadIr.style.display = activeDebugTab === "ir" ? "" : "none";
+  if (elCodecadPickmap) elCodecadPickmap.style.display = activeDebugTab === "pickmap" ? "" : "none";
+
+  btnShowLogTab?.classList.toggle("active", activeDebugTab === "log");
+  btnShowTraceTab?.classList.toggle("active", activeDebugTab === "trace");
+  btnShowIrTab?.classList.toggle("active", activeDebugTab === "ir");
+  btnShowPickmapTab?.classList.toggle("active", activeDebugTab === "pickmap");
+}
+
+function getActiveDebugElement() {
+  if (activeDebugTab === "trace") return elFreecadTrace;
+  if (activeDebugTab === "ir") return elCodecadIr;
+  if (activeDebugTab === "pickmap") return elCodecadPickmap;
+  return elLog;
+}
+
+function getActiveDebugLabel() {
+  if (activeDebugTab === "trace") return "FreeCAD Cmd";
+  if (activeDebugTab === "ir") return "CodeCAD JSON";
+  if (activeDebugTab === "pickmap") return "Selection";
+  return "Log";
+}
+
+async function copyTextToClipboard(text) {
+  if (navigator.clipboard) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  // Fallback for localhost / older browsers.
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.left = "-9999px";
+  textarea.style.top = "-9999px";
+  document.body.appendChild(textarea);
+  textarea.select();
+
+  try {
+    document.execCommand("copy");
+  } finally {
+    document.body.removeChild(textarea);
+  }
+}
+
+async function copyCurrentDebugView() {
+  const el = getActiveDebugElement();
+  const label = getActiveDebugLabel();
+
+  if (!el) {
+    log(`copy failed: no active debug panel for ${label}`);
+    return;
+  }
+
+  const text = el.textContent || "";
+
+  if (!text.trim()) {
+    log(`copy skipped: ${label} is empty`);
+    return;
+  }
+
+  try {
+    await copyTextToClipboard(text);
+    setStatus(`copied ${label}`);
+    log(`copied ${label} debug text`);
+
+    btnCopyDebugTab?.classList.add("copied");
+    setTimeout(() => {
+      btnCopyDebugTab?.classList.remove("copied");
+    }, 1500);
+  } catch (e) {
+    setStatus("copy failed");
+    log(`copy failed: ${e}`);
+  }
 }
 
 /**
@@ -672,6 +744,7 @@ btnShowLogTab?.addEventListener("click", () => showDebugTab("log"));
 btnShowTraceTab?.addEventListener("click", () => showDebugTab("trace"));
 btnShowIrTab?.addEventListener("click", () => showDebugTab("ir"));
 btnShowPickmapTab?.addEventListener("click", () => showDebugTab("pickmap"));
+btnCopyDebugTab?.addEventListener("click", copyCurrentDebugView);
 
 elCode.addEventListener("click", moveCodeCursorToBottom);
 btnPreview.addEventListener("click", () => render("preview"));

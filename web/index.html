@@ -215,10 +215,12 @@
       /* Tab Buttons Row */
       .debug-tab-buttons {
         display: flex;
+        flex-wrap: wrap;
+        align-items: center;
         background: #1f1f23;
         border-bottom: 1px solid #27272a;
         padding: 4px 4px 0 4px;
-        gap: 2px;
+        gap: 6px;
       }
 
       /* Tab Button styling */
@@ -233,7 +235,7 @@
         cursor: pointer;
         transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
         position: relative;
-        flex: none;
+        flex: 0 0 auto;
       }
       .debug-tab-buttons button:hover {
         color: #f4f4f5;
@@ -304,6 +306,24 @@
         color: #a1a1aa;
         margin-right: 6px;
       }
+
+      .copy-debug-button {
+        display: inline-flex !important;
+        align-items: center;
+        justify-content: center;
+        margin-left: auto;
+        border-color: #66aaff;
+        font-weight: 700;
+        white-space: nowrap;
+      }
+
+      .copy-debug-button:hover {
+        background: rgba(102, 170, 255, 0.16);
+      }
+
+      .copy-debug-button.copied {
+        border-color: #4a8;
+      }
     </style>
 
     <!-- three-cad-viewer styles -->
@@ -346,6 +366,10 @@
             <button id="showTraceTab" type="button">FreeCAD Cmd</button>
             <button id="showIrTab" type="button">CodeCAD JSON</button>
             <button id="showPickmapTab" type="button">Selection</button>
+
+            <button id="copyDebugTab" type="button" class="copy-debug-button">
+              Copy current
+            </button>
           </div>
 
           <pre id="log" class="debug-panel"></pre>
