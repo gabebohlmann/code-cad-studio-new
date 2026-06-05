@@ -7,6 +7,32 @@ import subprocess
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict
 
+def build_freecad_env(extra_pythonpath: str | None = None) -> dict:
+    """
+    Builds the environment used by the FreeCAD subprocess.
+
+    This is where we inject external Python packages, like build123d,
+    into FreeCAD's embedded Python interpreter.
+    """
+    env = os.environ.copy()
+
+    paths = []
+
+    if extra_pythonpath:
+        paths.append(os.path.abspath(os.path.expanduser(extra_pythonpath)))
+
+    existing_pythonpath = env.get("PYTHONPATH", "")
+    if existing_pythonpath:
+        paths.extend([p for p in existing_pythonpath.split(os.pathsep) if p])
+
+    deduped = []
+    for p in paths:
+        if p and p not in deduped:
+            deduped.append(p)
+
+    env["PYTHONPATH"] = os.pathsep.join(deduped)
+
+    return env
 
 def norm(p: str) -> str:
     """
@@ -46,6 +72,7 @@ class Job:
     work_dir: Optional[str] = None
     trace_path: Optional[str] = None
     ir_path: Optional[str] = None
+    pickmap_path: Optional[str] = None
 
 
 class JobStore:
@@ -91,12 +118,12 @@ class JobStore:
 
 
 def run_freecad_job(
-    *,
     freecad_cmd: str,
     run_py: str,
     code_text: str,
     mesh_quality: str = "preview",
     verbose: bool = True,
+    extra_pythonpath: str | None = None,
 ) -> Job:
     """
     Synchronously executes a FreeCAD rendering job in a subprocess.
@@ -135,12 +162,14 @@ def run_freecad_job(
         log_path = norm(os.path.join(work_dir, "run.log"))
         trace_path = norm(os.path.join(work_dir, "freecad_trace.py"))
         ir_path = norm(os.path.join(work_dir, "codecad_ir.json"))
+        pickmap_path = norm(os.path.join(work_dir, "codecad_pickmap.json"))
 
         job.code_path = code_path
         job.mesh_path = mesh_path
         job.shapes_path = shapes_path
         job.trace_path = trace_path
         job.ir_path = ir_path
+        job.pickmap_path = pickmap_path
 
         with open(code_path, "w", encoding="utf-8") as f:
             f.write(code_text)
@@ -152,7 +181,8 @@ def run_freecad_job(
             f"--mesh-quality {mesh_quality} "
             f"--shapes {shapes_path} "
             f"--trace {trace_path} "
-            f"--ir {ir_path}"
+            f"--ir {ir_path} "
+            f"--pickmap {pickmap_path}"
         )
         if verbose:
             pass_args += " --verbose"
@@ -176,6 +206,8 @@ def run_freecad_job(
         job.logs.append(f"[server] work_dir={work_dir}")
         job.logs.append(f"[server] log_file={log_path}")
 
+        freecad_env = build_freecad_env(extra_pythonpath)
+
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -184,7 +216,7 @@ def run_freecad_job(
             encoding="utf-8",
             errors="replace",
             bufsize=1,
-            env=env,
+            env=freecad_env,
         )
 
         assert proc.stdout is not None

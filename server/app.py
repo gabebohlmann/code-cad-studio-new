@@ -30,8 +30,33 @@ def norm(p: str) -> str:
 # ---- config (portable to remote later via env vars)
 FREECAD_CMD = os.environ.get(
     "FREECAD_CMD",
-    r"C:\Program Files\FreeCAD 1.2\bin\FreeCADCmd.exe",
+    "/home/gabe/Applications/freecad-1.1.1/squashfs-root/usr/bin/freecadcmd",
 )
+
+FREECAD_EXTRA_PYTHONPATH = os.environ.get(
+    "FREECAD_EXTRA_PYTHONPATH",
+    "/home/gabe/Applications/freecad-1.1.1/.venv-freecad311/lib/python3.11/site-packages",
+)
+
+
+def prepend_pythonpath(path: str) -> None:
+    """
+    Prepends a path to PYTHONPATH so child processes, including FreeCADCmd,
+    can import packages installed outside FreeCAD's bundled Python environment.
+    """
+    if not path:
+        return
+
+    path = os.path.abspath(os.path.expanduser(path))
+
+    existing = os.environ.get("PYTHONPATH", "")
+    parts = [p for p in existing.split(os.pathsep) if p]
+
+    if path not in parts:
+        os.environ["PYTHONPATH"] = os.pathsep.join([path] + parts)
+
+
+prepend_pythonpath(FREECAD_EXTRA_PYTHONPATH)
 
 # server/ is inside mod_root/server; web/ is mod_root/web; cli/run.py is mod_root/cli/run.py
 MOD_ROOT = norm(os.path.dirname(os.path.dirname(__file__)))
@@ -96,6 +121,7 @@ def _run_in_thread(job_id: str, req: RenderRequest):
         code_text=req.code,
         mesh_quality=req.mesh_quality,
         verbose=req.verbose,
+        extra_pythonpath=FREECAD_EXTRA_PYTHONPATH,
     )
     result.id = job_id
     jobs[job_id] = result
@@ -205,6 +231,7 @@ def job_status(job_id: str) -> Dict[str, Any]:
         "shapes_available": bool(j.shapes_path and os.path.exists(j.shapes_path)),
         "trace_available": bool(getattr(j, "trace_path", None) and os.path.exists(j.trace_path)),
         "ir_available": bool(getattr(j, "ir_path", None) and os.path.exists(j.ir_path)),
+        "pickmap_available": bool(getattr(j, "pickmap_path", None) and os.path.exists(j.pickmap_path)),
     }
 
 
@@ -288,3 +315,22 @@ def job_ir(job_id: str):
     if not getattr(j, "ir_path", None) or not os.path.exists(j.ir_path):
         raise HTTPException(status_code=404, detail="IR not found")
     return FileResponse(j.ir_path, media_type="application/json", filename="codecad_ir.json")
+
+
+@app.get("/api/v1/jobs/{job_id}/pickmap")
+def job_pickmap(job_id: str):
+    """
+    Retrieves the CodeCAD pickmap JSON generated for a completed job.
+    """
+    j = jobs.get(job_id)
+    if not j:
+        raise HTTPException(status_code=404, detail="job not found")
+    if j.status != "done":
+        raise HTTPException(status_code=409, detail=f"job not done (status={j.status})")
+    if not getattr(j, "pickmap_path", None) or not os.path.exists(j.pickmap_path):
+        raise HTTPException(status_code=404, detail="pickmap not found")
+    return FileResponse(
+        j.pickmap_path,
+        media_type="application/json",
+        filename="codecad_pickmap.json",
+    )
