@@ -593,10 +593,14 @@ def main(argv=None):
             try:
                 from core.pickmap import build_pickmap
 
+                pick_shape = _gather_target_shape(doc, code=code)
+
                 pickmap = build_pickmap(
                     doc=doc,
                     code=code,
                     ir_doc=result.get("ir") or {},
+                    target_shape=pick_shape,
+                    mesh_quality=args.mesh_quality,
                     render_part_id="/Group/Part_0",
                     render_part_name="Part_0",
                     export_source="three_cad_viewer_shapes_json",
