@@ -370,6 +370,121 @@ def _bbox_from_vertices_flat(verts_flat):
 
 
 
+def _shape_bbox_diag(shape):
+    try:
+        bb = shape.BoundBox
+        dx = float(bb.XMax - bb.XMin)
+        dy = float(bb.YMax - bb.YMin)
+        dz = float(bb.ZMax - bb.ZMin)
+        return max(math.sqrt(dx * dx + dy * dy + dz * dz), 1.0)
+    except Exception:
+        return 1.0
+
+
+def _safe_face_part_name(face_index: int) -> str:
+    return f"CodeCAD_FacePick_Face{int(face_index)}"
+
+
+def _tessellate_face_for_viewer_part(face, face_index: int, linear_defl: float, offset_eps: float):
+    """
+    Build a tiny selectable face-overlay part for three-cad-viewer.
+
+    The overlay is offset very slightly along the face normal so native
+    three-cad-viewer picking should hit this face part before the main Part_0
+    mesh. It is rendered almost transparent, but selected/highlighted by the
+    viewer as a separate part.
+    """
+    verts_flat = []
+    norms_flat = []
+    tris_flat = []
+
+    try:
+        pts, facets = face.tessellate(float(linear_defl))
+        pts = [_vec3(p) for p in pts]
+
+        vidx = 0
+
+        for f in facets:
+            idxs = list(f)
+            if len(idxs) < 3:
+                continue
+
+            for t in range(1, len(idxs) - 1):
+                p0 = pts[idxs[0]]
+                p1 = pts[idxs[t]]
+                p2 = pts[idxs[t + 1]]
+
+                n = _normalize(_cross(_sub(p1, p0), _sub(p2, p0)))
+
+                p0o = (
+                    p0[0] + n[0] * offset_eps,
+                    p0[1] + n[1] * offset_eps,
+                    p0[2] + n[2] * offset_eps,
+                )
+                p1o = (
+                    p1[0] + n[0] * offset_eps,
+                    p1[1] + n[1] * offset_eps,
+                    p1[2] + n[2] * offset_eps,
+                )
+                p2o = (
+                    p2[0] + n[0] * offset_eps,
+                    p2[1] + n[1] * offset_eps,
+                    p2[2] + n[2] * offset_eps,
+                )
+
+                verts_flat.extend(
+                    [
+                        p0o[0], p0o[1], p0o[2],
+                        p1o[0], p1o[1], p1o[2],
+                        p2o[0], p2o[1], p2o[2],
+                    ]
+                )
+                norms_flat.extend([n[0], n[1], n[2]] * 3)
+                tris_flat.extend([vidx, vidx + 1, vidx + 2])
+                vidx += 3
+
+    except Exception:
+        return None
+
+    if not verts_flat or not tris_flat:
+        return None
+
+    name = _safe_face_part_name(face_index)
+    ident_loc = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]]
+
+    return {
+        "id": f"/Group/{name}",
+        "type": "shapes",
+        "subtype": "solid",
+        "name": name,
+        "shape": {
+            "vertices": verts_flat,
+            "triangles": tris_flat,
+            "normals": norms_flat,
+            "edges": [],
+        },
+        "state": [1, 1],
+        "color": "#ffffff",
+
+        # Nearly invisible, but still present as a selectable rendered part.
+        # If picking does not hit these parts reliably, raise this to 0.03.
+        "alpha": 0.01,
+
+        "texture": None,
+        "loc": ident_loc,
+        "renderback": True,
+        "accuracy": None,
+        "bb": None,
+
+        # Extra metadata for CodeCAD; three-cad-viewer should ignore unknown keys.
+        "codecad_pick": {
+            "kind": "face",
+            "freecad_ref": f"Face{face_index}",
+            "face_index": int(face_index),
+        },
+    }
+
+
 def _export_three_cad_viewer_shapes_json(doc, out_path: str, quality: str, code: str = None):
     out_path = _normalize_path(out_path)
 
@@ -493,6 +608,23 @@ def _export_three_cad_viewer_shapes_json(doc, out_path: str, quality: str, code:
         "normal_len": 0,
         "bb": bb,
     }
+
+    # ---- Face pick overlay parts
+    try:
+        diag = _shape_bbox_diag(shape)
+        offset_eps = max(0.005, diag * 0.001)
+
+        for face_index, face in enumerate(getattr(shape, "Faces", []) or [], start=1):
+            face_part = _tessellate_face_for_viewer_part(
+                face=face,
+                face_index=face_index,
+                linear_defl=float(linear_defl),
+                offset_eps=float(offset_eps),
+            )
+            if face_part:
+                shapes["parts"].append(face_part)
+    except Exception as e:
+        _log(f"[CodeCADStudio] WARNING: face pick overlay export failed: {e}")
 
     try:
         with open(out_path, "w", encoding="utf-8") as f:

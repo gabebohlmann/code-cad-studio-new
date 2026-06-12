@@ -10,7 +10,6 @@ import {
   Viewer,
   Display,
 } from "https://cdn.jsdelivr.net/npm/three-cad-viewer@3.5.1/dist/three-cad-viewer.esm.min.js";
-import * as THREE from "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js";
 
 const API = "/api/v1";
 
@@ -28,19 +27,11 @@ const btnCopyDebugTab = document.getElementById("copyDebugTab");
 
 let currentPickmap = null;
 let currentSelection = null;
-let facePickGroup = null;
-let facePickMeshes = [];
-let hoveredFaceMesh = null;
-let selectedFaceMesh = null;
 let lastFacePickAt = 0;
-let faceRaycaster = new THREE.Raycaster();
-let facePointer = new THREE.Vector2();
-
-let facePointerDown = null;
-let facePickEventsInstalledOn = null;
+let viewerPointerDown = null;
+let viewerDragInProgress = false;
 
 const FACE_CLICK_MAX_MOVE_PX = 4;
-const FACE_CLICK_MAX_TIME_MS = 700;
 let activeDebugTab = "log";
 
 const btnShowLogTab = document.getElementById("showLogTab");
@@ -255,478 +246,50 @@ function summarizePickmapObject(obj) {
   ].join(" | ");
 }
 
-function isThreeCamera(obj) {
-  return Boolean(
-    obj &&
-      (
-        obj.isCamera ||
-        obj.isPerspectiveCamera ||
-        obj.isOrthographicCamera ||
-        obj.type === "PerspectiveCamera" ||
-        obj.type === "OrthographicCamera" ||
-        (
-          obj.projectionMatrix &&
-          obj.matrixWorld &&
-          obj.matrixWorldInverse &&
-          typeof obj.updateMatrixWorld === "function"
-        )
-      )
-  );
-}
-
-function unwrapCamera(obj) {
-  if (!obj) return null;
-
-  if (isThreeCamera(obj)) return obj;
-
-  // Some viewers/wrappers expose nested active cameras.
-  const candidates = [
-    obj.camera,
-    obj._camera,
-    obj.mainCamera,
-    obj.defaultCamera,
-    obj.activeCamera,
-    obj.currentCamera,
-    obj.cameraP,
-    obj.cameraO,
-    obj.controls?.object,
-    obj.orbitControls?.object,
-  ];
-
-  for (const c of candidates) {
-    if (isThreeCamera(c)) return c;
-  }
-
-  return null;
-}
-
-function isThreeScene(obj) {
-  return Boolean(
-    obj &&
-      (
-        obj.isScene ||
-        obj.type === "Scene" ||
-        obj.type === "RootScene" ||
-        (
-          Array.isArray(obj.children) &&
-          typeof obj.add === "function" &&
-          typeof obj.remove === "function"
-        )
-      )
-  );
-}
-
-function isThreeRenderer(obj) {
-  return Boolean(
-    obj &&
-      obj.domElement instanceof HTMLCanvasElement &&
-      typeof obj.render === "function"
-  );
-}
-
-function deepFind(root, predicate, maxDepth = 7) {
-  const seen = new WeakSet();
-
-  function walk(obj, depth) {
-    if (!obj || typeof obj !== "object") return null;
-    if (seen.has(obj)) return null;
-    seen.add(obj);
-
-    if (predicate(obj)) return obj;
-    if (depth <= 0) return null;
-
-    const priorityKeys = [
-      "scene",
-      "_scene",
-      "root",
-      "modelRoot",
-      "viewer",
-      "_viewer",
-      "display",
-      "_display",
-      "camera",
-      "_camera",
-      "mainCamera",
-      "defaultCamera",
-      "activeCamera",
-      "currentCamera",
-      "renderer",
-      "_renderer",
-      "renderManager",
-      "controls",
-      "orbitControls",
-    ];
-
-    for (const key of priorityKeys) {
-      try {
-        const found = walk(obj[key], depth - 1);
-        if (found) return found;
-      } catch {
-        // ignore
-      }
-    }
-
-    // Then scan own enumerable object fields.
-    for (const key of Object.keys(obj)) {
-      try {
-        const value = obj[key];
-        if (!value || typeof value !== "object") continue;
-
-        const found = walk(value, depth - 1);
-        if (found) return found;
-      } catch {
-        // Some viewer properties throw on access.
-      }
-    }
-
-    return null;
-  }
-
-  return walk(root, maxDepth);
-}
-
-let warnedMissingViewerCamera = false;
-
-function getViewerInternals() {
-  const roots = [
-    viewer,
-    display,
-    viewer?.viewer,
-    viewer?._viewer,
-    viewer?.cadViewer,
-    viewer?.view,
-    viewer?.display,
-    display?.viewer,
-    display?._viewer,
-    display?.cadViewer,
-    display?.view,
-  ].filter(Boolean);
-
-  let scene = null;
-  let camera = null;
-  let renderer = null;
-
-  for (const root of roots) {
-    if (!scene) {
-      scene = deepFind(root, isThreeScene, 8);
-    }
-
-    if (!camera) {
-      camera = unwrapCamera(root) || deepFind(root, isThreeCamera, 8);
-    }
-
-    if (!renderer) {
-      renderer = deepFind(root, isThreeRenderer, 8);
-    }
-  }
-
-  const domElement =
-    renderer?.domElement ||
-    document.querySelector("#viewer canvas") ||
-    document.querySelector("canvas");
-
-  if (!camera && !warnedMissingViewerCamera) {
-    warnedMissingViewerCamera = true;
-    console.warn(
-      "CodeCAD face picking: could not find three-cad-viewer camera. Face picking disabled until camera path is found.",
-      { viewer, display, scene, renderer, domElement }
-    );
-  }
-
-  return {
-    scene,
-    camera,
-    renderer,
-    domElement,
-  };
-}
-
-window.__codecadDumpViewerInternals = function () {
-  const internals = getViewerInternals();
-  console.log("CodeCAD viewer internals", internals);
-  console.log("viewer =", viewer);
-  console.log("display =", display);
-  return internals;
-};
-
-function requestViewerRender() {
-  try {
-    viewer?.render?.();
-    viewer?.requestRender?.();
-    viewer?.viewer?.render?.();
-    viewer?.viewer?.requestRender?.();
-  } catch {
-    // ignore
-  }
-}
-
-function makeFaceMaterial(kind) {
-  if (kind === "selected") {
-    return new THREE.MeshBasicMaterial({
-      color: 0x3b82f6,
-      transparent: true,
-      opacity: 0.42,
-      side: THREE.DoubleSide,
-      depthTest: true,
-      depthWrite: false,
-      colorWrite: true,
-      polygonOffset: true,
-      polygonOffsetFactor: -4,
-      polygonOffsetUnits: -4,
-    });
-  }
-
-  if (kind === "hover") {
-    return new THREE.MeshBasicMaterial({
-      color: 0xfacc15,
-      transparent: true,
-      opacity: 0.32,
-      side: THREE.DoubleSide,
-      depthTest: true,
-      depthWrite: false,
-      colorWrite: true,
-      polygonOffset: true,
-      polygonOffsetFactor: -3,
-      polygonOffsetUnits: -3,
-    });
-  }
-
-  // Raycastable but visually invisible. colorWrite=false avoids tinting or
-  // darkening the main model while still letting THREE.Raycaster hit the mesh.
-  return new THREE.MeshBasicMaterial({
-    color: 0xffffff,
-    transparent: true,
-    opacity: 0.0,
-    side: THREE.DoubleSide,
-    depthTest: true,
-    depthWrite: false,
-    colorWrite: false,
-    polygonOffset: true,
-    polygonOffsetFactor: -2,
-    polygonOffsetUnits: -2,
-  });
-}
-
-function resetFaceMeshMaterial(mesh) {
-  if (!mesh) return;
-  mesh.material = makeFaceMaterial("base");
-}
-
-function setHoveredFaceMesh(mesh) {
-  if (hoveredFaceMesh && hoveredFaceMesh !== selectedFaceMesh) {
-    resetFaceMeshMaterial(hoveredFaceMesh);
-  }
-
-  hoveredFaceMesh = mesh || null;
-
-  if (hoveredFaceMesh && hoveredFaceMesh !== selectedFaceMesh) {
-    hoveredFaceMesh.material = makeFaceMaterial("hover");
-  }
-
-  requestViewerRender();
-}
-
-function setSelectedFaceMesh(mesh) {
-  if (selectedFaceMesh && selectedFaceMesh !== hoveredFaceMesh) {
-    resetFaceMeshMaterial(selectedFaceMesh);
-  }
-
-  selectedFaceMesh = mesh || null;
-
-  if (selectedFaceMesh) {
-    selectedFaceMesh.material = makeFaceMaterial("selected");
-  }
-
-  requestViewerRender();
-}
-
-function clearFacePickOverlay() {
-  const { scene } = getViewerInternals();
-
-  if (facePickGroup && scene) {
-    try {
-      scene.remove(facePickGroup);
-    } catch {
-      // ignore
-    }
-  }
-
-  for (const mesh of facePickMeshes) {
-    try {
-      mesh.geometry?.dispose?.();
-      mesh.material?.dispose?.();
-    } catch {
-      // ignore
-    }
-  }
-
-  facePickGroup = null;
-  facePickMeshes = [];
-  hoveredFaceMesh = null;
-  selectedFaceMesh = null;
-}
-
-function createFaceMesh(objectRecord, faceRecord) {
-  const pickMesh = faceRecord.pick_mesh || {};
-  const vertices = pickMesh.vertices || [];
-  const triangles = pickMesh.triangles || [];
-
-  if (!vertices.length || !triangles.length) {
-    return null;
-  }
-
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute(
-    "position",
-    new THREE.Float32BufferAttribute(vertices, 3)
-  );
-  geometry.setIndex(triangles);
-  geometry.computeVertexNormals();
-  geometry.computeBoundingSphere();
-
-  const mesh = new THREE.Mesh(geometry, makeFaceMaterial("base"));
-  mesh.name = `pick:${faceRecord.face_id}`;
-  mesh.userData.codecadPick = {
-    kind: "face",
-    object: objectRecord,
-    face: faceRecord,
-  };
-
-  return mesh;
-}
-
-function rebuildFacePickOverlay() {
-  clearFacePickOverlay();
-
-  const { scene, domElement } = getViewerInternals();
-
-  if (!scene || !domElement || !currentPickmap) {
-    log("face picking overlay unavailable: viewer internals not found");
-    return;
-  }
-
-  facePickGroup = new THREE.Group();
-  facePickGroup.name = "CodeCAD_FacePickOverlay";
-
-  for (const objectRecord of currentPickmap.objects || []) {
-    for (const faceRecord of objectRecord.faces || []) {
-      const mesh = createFaceMesh(objectRecord, faceRecord);
-      if (!mesh) continue;
-
-      facePickGroup.add(mesh);
-      facePickMeshes.push(mesh);
-    }
-  }
-
-  scene.add(facePickGroup);
-  installFacePickEvents();
-
-  log(`face pick overlay loaded: ${facePickMeshes.length} faces`);
-  requestViewerRender();
-}
-
-function getFaceIntersectionFromEvent(event) {
-  if (!facePickMeshes.length) return null;
-
-  const { camera, domElement } = getViewerInternals();
-
-  if (!camera || !isThreeCamera(camera)) {
-    return null;
-  }
-
-  if (!domElement) {
-    return null;
-  }
-
-  const rect = domElement.getBoundingClientRect();
-
-  facePointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
-  facePointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
-
-  faceRaycaster.setFromCamera(facePointer, camera);
-
-  const hits = faceRaycaster.intersectObjects(facePickMeshes, false);
-  if (!hits || !hits.length) return null;
-
-  // Prefer a face whose outward normal points toward the camera ray.
-  // This helps avoid selecting a hidden/back face on closed solids.
-  for (const hit of hits) {
-    const faceRecord = hit.object?.userData?.codecadPick?.face;
-    const n = faceRecord?.normal || null;
-    if (!n) continue;
-
-    const dot =
-      Number(n[0]) * faceRaycaster.ray.direction.x +
-      Number(n[1]) * faceRaycaster.ray.direction.y +
-      Number(n[2]) * faceRaycaster.ray.direction.z;
-
-    if (dot < -0.05) {
-      return hit;
-    }
-  }
-
-  return hits[0];
-}
-
 function summarizePickmapFace(objectRecord, faceRecord) {
   if (!objectRecord || !faceRecord) return "Nothing selected";
 
   const selector =
     (faceRecord.selector_candidates || [])[0] ||
-    `${objectRecord.name || objectRecord.object_id}.faces()[${faceRecord.index - 1}]`;
+    `${objectRecord.name || objectRecord.object_id || "part"}.faces()[${Number(faceRecord.index || 1) - 1}]`;
 
   const normal = (faceRecord.normal || [])
     .map((n) => Number(n).toFixed(3))
     .join(", ");
 
+  const center = (faceRecord.center || [])
+    .map((n) => Number(n).toFixed(3))
+    .join(", ");
+
+  const area =
+    faceRecord.area !== undefined && faceRecord.area !== null
+      ? Number(faceRecord.area).toFixed(3)
+      : "?";
+
   return [
-    `Face: ${faceRecord.freecad_ref || faceRecord.face_id}`,
-    `Object: ${objectRecord.name || objectRecord.object_id}`,
+    `Face: ${faceRecord.freecad_ref || faceRecord.face_id || "unknown"}`,
+    `Object: ${objectRecord.name || objectRecord.object_id || "unknown"}`,
     `Surface: ${faceRecord.surface_type || "unknown"}`,
-    `Area: ${Number(faceRecord.area ?? 0).toFixed(3)}`,
+    `Area: ${area}`,
+    `Center: [${center}]`,
     `Normal: [${normal}]`,
     `Selector: ${selector}`,
   ].join(" | ");
 }
 
-function selectFaceFromMesh(mesh, hit) {
-  if (!mesh?.userData?.codecadPick) return;
+function clearFacePickOverlay() {
+  // Face picking is now native to the Shapes JSON artifact.
+  // Each CAD face is emitted as a nearly transparent three-cad-viewer part.
+}
 
-  const pick = mesh.userData.codecadPick;
-  const objectRecord = pick.object;
-  const faceRecord = pick.face;
+function rebuildFacePickOverlay() {
+  // No browser-side overlay required.
+  const faceCount = (currentPickmap?.objects || []).reduce(
+    (acc, obj) => acc + (obj.faces || []).length,
+    0
+  );
 
-  lastFacePickAt = Date.now();
-
-  setSelectedFaceMesh(mesh);
-
-  setSelection({
-    kind: "face",
-    render_revision: currentPickmap?.render_revision,
-    object: objectRecord,
-    face: faceRecord,
-    point: hit?.point
-      ? [hit.point.x, hit.point.y, hit.point.z]
-      : null,
-  });
-
-  console.debug("selected face", {
-    face_id: faceRecord.face_id,
-    freecad_ref: faceRecord.freecad_ref,
-    center: faceRecord.center,
-    normal: faceRecord.normal,
-    point: hit?.point,
-  });
-
-  console.debug("selected face diagnostic", {
-    face: faceRecord.freecad_ref,
-    center: faceRecord.center,
-    normal: faceRecord.normal,
-    hitPoint: hit?.point ? [hit.point.x, hit.point.y, hit.point.z] : null,
-    meshWorldPosition: mesh.getWorldPosition(new THREE.Vector3()).toArray(),
-  });
-
-  showDebugTab("pickmap");
+  log(`native face pick parts loaded: ${faceCount} faces`);
 }
 
 function pointerDistancePx(a, event) {
@@ -738,93 +301,166 @@ function pointerDistancePx(a, event) {
   return Math.sqrt(dx * dx + dy * dy);
 }
 
-function isFaceClickCandidate(event) {
-  if (!facePointerDown) return false;
-
-  const moved = pointerDistancePx(facePointerDown, event);
-  const elapsed = Date.now() - facePointerDown.time;
-
-  return moved <= FACE_CLICK_MAX_MOVE_PX && elapsed <= FACE_CLICK_MAX_TIME_MS;
-}
-
-function onFacePointerDown(event) {
-  // Left mouse button or touch/pen primary.
+function onViewerPointerDown(event) {
   if (event.button !== undefined && event.button !== 0) {
-    facePointerDown = null;
+    viewerPointerDown = null;
+    viewerDragInProgress = false;
     return;
   }
 
-  facePointerDown = {
+  viewerPointerDown = {
     x: event.clientX,
     y: event.clientY,
     time: Date.now(),
-    pointerId: event.pointerId,
   };
+
+  viewerDragInProgress = false;
 }
 
-function onFacePointerMove(event) {
-  if (facePointerDown) {
-    const moved = pointerDistancePx(facePointerDown, event);
-    if (moved > FACE_CLICK_MAX_MOVE_PX) {
-      setHoveredFaceMesh(null);
+function onViewerPointerMove(event) {
+  if (!viewerPointerDown) return;
+
+  const moved = pointerDistancePx(viewerPointerDown, event);
+
+  if (moved > FACE_CLICK_MAX_MOVE_PX) {
+    viewerDragInProgress = true;
+  }
+}
+
+function onViewerPointerUp() {
+  // Do not clear viewerDragInProgress immediately. Native three-cad-viewer
+  // change/pick events may fire just after pointerup.
+  setTimeout(() => {
+    viewerPointerDown = null;
+    viewerDragInProgress = false;
+  }, 150);
+}
+
+function installViewerInteractionGuards() {
+  const canvas =
+    document.querySelector("#viewer canvas") ||
+    document.querySelector("canvas");
+
+  const targets = [canvas, elViewer].filter(Boolean);
+
+  for (const target of targets) {
+    target.removeEventListener("pointerdown", onViewerPointerDown, true);
+    target.removeEventListener("pointermove", onViewerPointerMove, true);
+    target.removeEventListener("pointerup", onViewerPointerUp, true);
+    target.removeEventListener("pointerleave", onViewerPointerUp, true);
+
+    target.addEventListener("pointerdown", onViewerPointerDown, true);
+    target.addEventListener("pointermove", onViewerPointerMove, true);
+    target.addEventListener("pointerup", onViewerPointerUp, true);
+    target.addEventListener("pointerleave", onViewerPointerUp, true);
+  }
+}
+
+function extractPickString(pick) {
+  if (!pick) return "";
+
+  const candidates = [
+    pick.id,
+    pick.name,
+    pick.path,
+    pick.objectId,
+    pick.partId,
+    pick.fullPath,
+    pick?.object?.id,
+    pick?.object?.name,
+    pick?.object?.path,
+    pick?.object?.userData?.id,
+    pick?.object?.userData?.partId,
+    pick?.object?.userData?.objectId,
+  ];
+
+  return candidates
+    .filter((x) => x !== undefined && x !== null)
+    .map((x) => String(x))
+    .join(" ");
+}
+
+function extractFaceRefFromPick(pick) {
+  const raw = extractPickString(pick);
+
+  // Matches:
+  //   /Group/CodeCAD_FacePick_Face5
+  //   CodeCAD_FacePick_Face5
+  //   Face5
+  const m =
+    raw.match(/CodeCAD_FacePick_Face(\d+)/) ||
+    raw.match(/\bFace(\d+)\b/);
+
+  if (!m) return null;
+
+  return `Face${Number(m[1])}`;
+}
+
+function findPickmapFaceByRef(faceRef) {
+  if (!faceRef || !currentPickmap) return null;
+
+  for (const objectRecord of currentPickmap.objects || []) {
+    for (const faceRecord of objectRecord.faces || []) {
+      if (faceRecord.freecad_ref === faceRef) {
+        return {
+          object: objectRecord,
+          face: faceRecord,
+        };
+      }
     }
-    return;
   }
 
-  const hit = getFaceIntersectionFromEvent(event);
-  setHoveredFaceMesh(hit?.object || null);
+  return null;
 }
 
-function onFacePointerUp(event) {
-  const shouldSelect = isFaceClickCandidate(event);
-  facePointerDown = null;
-
-  if (!shouldSelect) {
-    // Drag/orbit, not click.
+function handleNativeViewerPick(pick) {
+  if (viewerDragInProgress) {
     return;
   }
 
-  const hit = getFaceIntersectionFromEvent(event);
+  const faceRef = extractFaceRefFromPick(pick);
+  const hit = findPickmapFaceByRef(faceRef);
 
   if (hit) {
-    selectFaceFromMesh(hit.object, hit);
+    lastFacePickAt = Date.now();
+
+    setSelection({
+      kind: "face",
+      render_revision: currentPickmap?.render_revision,
+      object: hit.object,
+      face: hit.face,
+      raw_pick: pick,
+    });
+
+    console.debug("selected native face", {
+      face: hit.face.freecad_ref,
+      face_id: hit.face.face_id,
+      raw_pick: pick,
+    });
+
+    showDebugTab("pickmap");
     return;
   }
 
-  // No face hit. For now, do not fall back to object selection here.
-  // Object fallback can be re-enabled after face picking is stable.
-}
+  // Fallback: object-level selection.
+  const renderedId = extractRenderedPartIdFromPick(pick);
 
-function onFacePointerLeave() {
-  facePointerDown = null;
-  setHoveredFaceMesh(null);
-}
+  const object =
+    findPickmapObjectForRenderedPart(renderedId) ||
+    findPickmapObjectForRenderedPart("/Group/Part_0") ||
+    findPickmapObjectForRenderedPart("Part_0");
 
-function installFacePickEvents() {
-  const { domElement } = getViewerInternals();
-  if (!domElement) return;
+  if (!object) return;
 
-  if (facePickEventsInstalledOn === domElement) return;
+  setSelection({
+    kind: "object",
+    render_revision: currentPickmap?.render_revision,
+    render_part_id: renderedId || "/Group/Part_0",
+    object,
+    raw_pick: pick,
+  });
 
-  if (facePickEventsInstalledOn) {
-    try {
-      facePickEventsInstalledOn.removeEventListener("pointerdown", onFacePointerDown, false);
-      facePickEventsInstalledOn.removeEventListener("pointermove", onFacePointerMove, false);
-      facePickEventsInstalledOn.removeEventListener("pointerup", onFacePointerUp, false);
-      facePickEventsInstalledOn.removeEventListener("pointerleave", onFacePointerLeave, false);
-    } catch {
-      // ignore
-    }
-  }
-
-  // Use bubble phase, not capture phase, so orbit controls still get first-class
-  // behavior and we do not accidentally turn camera manipulation into selection.
-  domElement.addEventListener("pointerdown", onFacePointerDown, false);
-  domElement.addEventListener("pointermove", onFacePointerMove, false);
-  domElement.addEventListener("pointerup", onFacePointerUp, false);
-  domElement.addEventListener("pointerleave", onFacePointerLeave, false);
-
-  facePickEventsInstalledOn = domElement;
+  showDebugTab("pickmap");
 }
 
 function setSelection(selection) {
@@ -929,12 +565,16 @@ function handleViewerPick(pick) {
  * * @param {object} change - The event data from the viewer.
  */
 function notifyChange(change) {
-  // three-cad-viewer can emit pick/change events during normal camera interaction.
-  // CodeCAD selection is now handled by our explicit pointerup raycast path with
-  // a drag threshold. Do not update selection here.
-  //
-  // Uncomment temporarily when debugging viewer events:
-  // console.debug("viewer change:", change);
+  const pick =
+    change?.lastPick?.new ||
+    change?.lastPick ||
+    change?.pick ||
+    change?.selected ||
+    null;
+
+  if (!pick) return;
+
+  handleNativeViewerPick(pick);
 }
 
 /**
@@ -990,6 +630,8 @@ function createCadViewer() {
   // create display + viewer exactly as the upstream skeleton does
   display = new Display(elViewer, displayOptions);
   viewer = new Viewer(display, viewerOptions, notifyChange);
+
+  setTimeout(installViewerInteractionGuards, 0);
 
   return viewer;
 }
@@ -1111,8 +753,10 @@ function showShapes(shapes) {
     // ignore
   }
 
-  // IMPORTANT: pass renderOptions + viewerOptions like the upstream skeleton 
+  // IMPORTANT: pass renderOptions + viewerOptions like the upstream skeleton
   viewer.render(shapes, renderOptions, viewerOptions);
+
+  setTimeout(installViewerInteractionGuards, 0);
 }
 
 function moveCodeCursorToBottom() {
