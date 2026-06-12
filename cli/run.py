@@ -463,13 +463,15 @@ def _tessellate_face_for_viewer_part(face, face_index: int, linear_defl: float, 
             "normals": norms_flat,
             "edges": [],
         },
-        "state": [1, 1],
-        "color": "#ffffff",
+        # Show the face surface, but do not draw overlay edges by default.
+        # three-cad-viewer state tuple is [shape_state, edge_state]:
+        # 0 hidden, 1 shown, 3 does-not-exist.
+        "state": [1, 3],
 
-        # Nearly invisible, but still present as a selectable rendered part.
-        # If picking does not hit these parts reliably, raise this to 0.03.
-        "alpha": 0.01,
-
+        # Keep the pick overlay almost invisible until three-cad-viewer's native
+        # selected-part styling is applied.
+        "color": "#93c5fd",
+        "alpha": 0.001,
         "texture": None,
         "loc": ident_loc,
         "renderback": True,

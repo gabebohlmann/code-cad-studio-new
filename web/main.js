@@ -292,6 +292,8 @@ function rebuildFacePickOverlay() {
   log(`native face pick parts loaded: ${faceCount} faces`);
 }
 
+
+
 function pointerDistancePx(a, event) {
   if (!a) return Infinity;
 
@@ -442,7 +444,6 @@ function handleNativeViewerPick(pick) {
     return;
   }
 
-  // Fallback: object-level selection.
   const renderedId = extractRenderedPartIdFromPick(pick);
 
   const object =
